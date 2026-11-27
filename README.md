@@ -99,7 +99,7 @@ $experiment = @{
 .\scripts\play-4050.ps1 -Exe 'C:\Path\To\Your\Title.exe' -FrameCsv '.\presents.csv' -More $experiment
 ~~~
 
-Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `ac2ba0954165330aebe40634cba66aa8657d7cb0`.
+Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `779dffcbf4bed45b3e85ab576756fa8608559ec8`.
 
 ## Shader output and pipeline failures
 
@@ -135,6 +135,10 @@ The second run loaded a warmer pipeline cache. The GPU supported levels on deman
 The eligibility fix now considers read-only textures backed by a title-provided address, including textures that request a full mip chain. Reserved mip chains bypass the ordinary texture pool. Sparse uploads refresh staging before mapping the tiles needed by the current upload. Fully mapped assets and textures that the GPU writes retain the ordinary allocation path. The RTX 4050 hardware test passed with both upload submission modes and texture pooling enabled. It verified uploads into a partly mapped chain for explicit and implicit mip counts. Enable this mode with `VICTORY_LEVELS_ON_DEMAND=1` and `VICTORY_TEXTURE_DROP_MIPS=0`. [CGBJ resource implementation](https://github.com/DoubleGhosty/cool_fox/blob/main/crates/victory-gpu/src/resource.rs)
 
 With the corrected build and the same copied profile and graphics settings, 134 heavy presents produced a 542.7 ms p50 (546.1 ms median) and 2,731.3 ms p95. The game exited normally at the timed cutoff. At the peak it reported 948 active tiled textures and 2,278 MiB of mip storage left unallocated relative to fully backing those chains. Peak texture-admission accounting was 4,051 MiB against a 3,606 MiB threshold. This boot presented more slowly than the previous levels-on-demand attempt. Copy work, texture uploads and dropped draws remained visible in the logs. The visual comparison is still pending. [Corrected build timing samples](diagnostics/rtx4050-2026-11-27-sparse-texture.tsv.txt)
+
+### Read only the mapped mip prefix
+
+With levels on demand enabled, `VICTORY_SPARSE_TEXTURE_READ=1` reads and hashes just the span needed by held mips of a partly mapped texture. The renderer uses the full read for soft views, unreadable prefixes and exact refreshes. The prefix hash includes the held-mip mask in its cache key and is kept separate from the full-texture equality check. The release log reports the number of shortened reads and logical source bytes skipped. The RTX 4050 hardware fixture passed with the switch off and with it on in both upload submission modes.
 
 ## Credits and license
 

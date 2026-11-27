@@ -336,7 +336,7 @@ index c09e6930f2a53d36df86f2ae9d046c91cd2688c9..0d7ea537e656d3e0c5e71b1831df0f96
              // them it brings up to date here, in the dynamic slots.
              let title_first = heap.index(table).filter(|first| first + n <= host.count());
 diff --git a/crates/victory-gpu/src/host.rs b/crates/victory-gpu/src/host.rs
-index b4baed734b22cb888ce2fe6234fec12acc4baa8b..faa212752bf89c0bd1e675da5a8399b649440c1e 100644
+index b4baed734b22cb888ce2fe6234fec12acc4baa8b..b7a5d03423ce453e905ec38866bac19e1caf0f54 100644
 --- a/crates/victory-gpu/src/host.rs
 +++ b/crates/victory-gpu/src/host.rs
 @@ -5,7 +5,7 @@
@@ -683,7 +683,18 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..faa212752bf89c0bd1e675da5a8399b6
          let mesh_largest = MESH_GROUPS[0].swap(0, Ordering::Relaxed);
          let mesh_groups = MESH_GROUPS[1].swap(0, Ordering::Relaxed) as f64 / frames;
          let refused = BUDGET_NOTES[0].swap(0, Ordering::Relaxed) as f64 / frames;
-@@ -9403,6 +9618,12 @@ impl Meter {
+@@ -9346,6 +9561,10 @@ impl Meter {
+             }
+         }
+         {
++            let [sparse_reads, sparse_bytes] = crate::texture::SPARSE_READS.each_ref().map(|n| n.swap(0, Ordering::Relaxed));
++            if sparse_reads > 0 {
++                tracing::info!(sparse_reads, sparse_bytes, "sparse texture prefixes read and source bytes skipped since previous report");
++            }
+             let [own, asking, still, all] =
+                 [0, 1, 2, 3].map(|i| crate::texture::REFRESH_WAITS[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames);
+             if all >= 1.0 {
+@@ -9403,6 +9622,12 @@ impl Meter {
          let drops = crate::pipeline::take_drops();
          if self.logged.elapsed() >= std::time::Duration::from_secs(5) {
              self.logged = std::time::Instant::now();
@@ -696,7 +707,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..faa212752bf89c0bd1e675da5a8399b6
              tracing::info!(
                  "placed texture views: {} writes of another view of the texture a slot showed (it kept the old view until the new was made)",
                  crate::descriptor::host::KEPT_VIEWS.load(Ordering::Relaxed)
-@@ -10026,8 +10247,15 @@ impl Host {
+@@ -10026,8 +10251,15 @@ impl Host {
                  },
              );
              let called = crate::streamline::present_called(&presenting);
@@ -1499,7 +1510,7 @@ index 22edcf3d9a7e95cf641ffaf74e3e2007a86da113..cfbb13b206f1f5aaea0e4dcd24f929cc
              assert_eq!(second.bias, 0);
              // The title's views may change under the heap.
 diff --git a/crates/victory-gpu/src/resource.rs b/crates/victory-gpu/src/resource.rs
-index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..923788ecc8695dce7309b443f69179b32857e716 100644
+index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..8eb49fef173e2502fea9b7ce83c072357381c3c9 100644
 --- a/crates/victory-gpu/src/resource.rs
 +++ b/crates/victory-gpu/src/resource.rs
 @@ -1624,6 +1624,94 @@ fn fills(desc: &ResourceDesc) -> bool {
@@ -1662,7 +1673,7 @@ index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..923788ecc8695dce7309b443f69179b3
          && d.sample_count <= 1
          && clear_value.is_none()
          && texture_layout(desc).is_some_and(|t| !t.planes[0].layout.desc.swizzle.xor())
-@@ -3599,6 +3696,77 @@ mod tests {
+@@ -3599,6 +3696,85 @@ mod tests {
          }
      }
  
@@ -1730,7 +1741,15 @@ index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..923788ecc8695dce7309b443f69179b3
 +            let list = gpu.new_list().unwrap();
 +            crate::texture::upload(&list, title, host);
 +            list.close();
++            let [reads_before, bytes_before] = crate::texture::SPARSE_READS.each_ref()
++                .map(|counter| counter.load(std::sync::atomic::Ordering::Relaxed));
 +            gpu.execute_sync_internal(&list);
++            if crate::switch::on("VICTORY_SPARSE_TEXTURE_READ") {
++                let [reads, bytes] = crate::texture::SPARSE_READS.each_ref()
++                    .map(|counter| counter.load(std::sync::atomic::Ordering::Relaxed));
++                assert_eq!(reads - reads_before, 1);
++                assert!(bytes - bytes_before >= (size - mapped) as u64);
++            }
 +            assert!(tiled.given_bytes() > 0, "mapped tail gets tiles after upload");
 +            assert!(tiled.given_bytes() < size as u64, "unmapped levels still have no tiles");
 +            assert!(unsafe { gpu.device.GetDeviceRemovedReason().is_ok() });
@@ -1740,7 +1759,7 @@ index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..923788ecc8695dce7309b443f69179b3
      fn heap(size: u64) -> This {
          let desc = HeapDesc {
              size,
-@@ -4061,6 +4229,310 @@ mod tests {
+@@ -4061,6 +4237,310 @@ mod tests {
          }
      }
  
@@ -2288,10 +2307,34 @@ index 5b7a2fcf7a6b6f50306400571f91f76390a6d0fd..e5b13e89473d99fc3708757dc75d4275
          let len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
          Some((String::from_utf16_lossy(&desc.Description[..len]), desc.AdapterLuid))
 diff --git a/crates/victory-gpu/src/texture.rs b/crates/victory-gpu/src/texture.rs
-index 17955a108c0b678eee42a8ba01af0ad4337263f3..a839a40b91c66535d377c8e9273df7603dafea43 100644
+index 17955a108c0b678eee42a8ba01af0ad4337263f3..1c1ea8098c2903a90352e18ada9e553081199d52 100644
 --- a/crates/victory-gpu/src/texture.rs
 +++ b/crates/victory-gpu/src/texture.rs
-@@ -181,6 +181,11 @@ pub(crate) fn alias(list: &HostList, placed: This, source: This) -> bool {
+@@ -103,6 +103,8 @@ pub(crate) struct Staging {
+ #[derive(Default)]
+ struct Last {
+     hash: Option<Digest>,
++    /// Tile mask and length when the hash covers only a mapped mip prefix.
++    sparse_prefix: Option<(u32, usize)>,
+     asked: u64,
+     /// The frame a partly mapped texture was last read in.
+     partial: Option<u64>,
+@@ -112,6 +114,14 @@ struct Last {
+     hot_until: u64,
+ }
+ 
++fn sparse_texture_read() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| crate::switch::on("VICTORY_SPARSE_TEXTURE_READ"))
++}
++
++pub(crate) static SPARSE_READS: [std::sync::atomic::AtomicU64; 2] =
++    [const { std::sync::atomic::AtomicU64::new(0) }; 2];
++
+ /// Frames a guarded texture is hashed at every check from its first check,
+ /// and after the hash found a change the guard did not see.
+ const HOT_FRAMES: u64 = 64;
+@@ -181,6 +191,11 @@ pub(crate) fn alias(list: &HostList, placed: This, source: This) -> bool {
      const COPY_SOURCE: u32 = 0x800;
      // (All of its levels: the copy is level by level.)
      crate::resource::want_level(placed, 0);
@@ -2303,7 +2346,7 @@ index 17955a108c0b678eee42a8ba01af0ad4337263f3..a839a40b91c66535d377c8e9273df760
      let (Some(to), Some(from)) = (
          crate::resource::host_resource(placed),
          crate::resource::host_resource(source),
-@@ -925,7 +930,7 @@ pub(crate) fn upload_from(list: &HostList, resource: This, first: u32) {
+@@ -925,7 +940,7 @@ pub(crate) fn upload_from(list: &HostList, resource: This, first: u32) {
          list.defer_host(move || noted.note_held());
          return;
      };
@@ -2312,6 +2355,153 @@ index 17955a108c0b678eee42a8ba01af0ad4337263f3..a839a40b91c66535d377c8e9273df760
      list.defer_host(move || {
          let waiting = on_demand.uploaded(staging.detiled.load(Relaxed), staging.memory as u64);
          staging.waiting.store(if waiting { crate::host::moment().max(1) } else { 0 }, Relaxed);
+@@ -1401,7 +1416,10 @@ impl Staging {
+     /// The host copy holds what the staging buffer was filled from
+     /// ([`unchanged`]).
+     fn note_held(&self) {
+-        let hash = self.last.lock().unwrap_or_else(|e| e.into_inner()).hash;
++        let hash = {
++            let last = self.last.lock().unwrap_or_else(|e| e.into_inner());
++            last.hash.filter(|_| last.sparse_prefix.is_none())
++        };
+         *self.holds.lock().unwrap_or_else(|e| e.into_inner()) = hash.map(|hash| (self.first, hash));
+     }
+ 
+@@ -1454,6 +1472,9 @@ impl Staging {
+                 return 0;
+             }
+             last.asked = now;
++            if last.sparse_prefix.take().is_some() {
++                last.hash = None;
++            }
+             // Read through the copy, which stands unmapped pages: memory of
+             // big pools is too slow to ask page by page.
+             with_read(size, |read| {
+@@ -1550,6 +1571,21 @@ impl Staging {
+                 return 0;
+             }
+             last.partial = Some(frame);
++            if self.on_demand && !exact && sparse_texture_read()
++                && let Some((read, changed)) = self.refresh_sparse_prefix(last)
++            {
++                if changed {
++                    found_blind(last);
++                    #[cfg(feature = "diagnostics")]
++                    crate::copystat::add(crate::copystat::C::TexChanged, read as u64);
++                }
++                #[cfg(feature = "diagnostics")]
++                crate::copystat::add(crate::copystat::C::TexHashed, read as u64);
++                return read;
++            }
++            if last.sparse_prefix.take().is_some() {
++                last.hash = None;
++            }
+             #[cfg(feature = "diagnostics")]
+             crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
+             let changed = with_read(size, |read| {
+@@ -1574,6 +1610,9 @@ impl Staging {
+             }
+             return size;
+         }
++        if last.sparse_prefix.take().is_some() {
++            last.hash = None;
++        }
+         // (A texture with pages in views the runtime keeps in its books
+         // alone, `VICTORY_SOFT_VIEWS`, has no memory to read in place: its
+         // bytes come from the pages, through the copy. `_mapped` is held: no
+@@ -1611,6 +1650,39 @@ impl Staging {
+         size
+     }
+ 
++    /// Reads the prefix needed by the largest held mip while the caller
++    /// holds the title mapping lock. A hole inside the prefix or a soft
++    /// view still uses the full logical read, including its zero fill.
++    fn refresh_sparse_prefix(&self, last: &mut Last) -> Option<(usize, bool)> {
++        use std::sync::atomic::Ordering::Relaxed;
++        let judgement = self.judgement();
++        let held = self.held_levels(judgement);
++        if held == 0 || held.trailing_zeros() < self.first {
++            return None;
++        }
++        let len = self.layout.bytes_from(held.trailing_zeros()) as usize;
++        if len >= self.read || !crate::watch::soft_runs(self.memory as usize, len).is_empty() {
++            return None;
++        }
++        with_read(len, |read| {
++            if !crate::host::read_into(self.memory, read) || read.iter().all(|&byte| byte == 0) {
++                return None;
++            }
++            SPARSE_READS[0].fetch_add(1, Relaxed);
++            SPARSE_READS[1].fetch_add((self.read - len) as u64, Relaxed);
++            let hash = digest(read);
++            let key = (held, len);
++            let changed = last.hash != Some(hash) || last.sparse_prefix != Some(key);
++            last.hash = Some(hash);
++            last.sparse_prefix = Some(key);
++            self.remember_levels(judgement, held);
++            if changed {
++                self.detile_levels(read, held);
++            }
++            Some((len, changed))
++        })
++    }
++
+     /// A refresh while the runtime is remapping title memory ([`no_wait`]):
+     /// the texture is read through the kernel, which fails if a page of it
+     /// is not there at this moment. Then a staging buffer that was filled
+@@ -1625,7 +1697,7 @@ impl Staging {
+                 return false;
+             }
+             let hash = digest(read);
+-            if last.hash != Some(hash) {
++            if last.sparse_prefix.take().is_some() || last.hash != Some(hash) {
+                 last.hash = Some(hash);
+                 self.detile(read);
+             }
+@@ -1658,7 +1730,7 @@ impl Staging {
+                 return false;
+             }
+             let hash = digest(read);
+-            if last.hash != Some(hash) {
++            if last.sparse_prefix.take().is_some() || last.hash != Some(hash) {
+                 last.hash = Some(hash);
+                 self.detile(read);
+                 changed = true;
+@@ -1711,21 +1783,29 @@ impl Staging {
+ 
+     /// Detiles `tiled` (the texture's memory) into the staging buffer.
+     fn detile(&self, tiled: &[u8]) {
+-        self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+         // Levels on demand: which levels are the title's is judged here,
+         // once, for what the staging buffer holds from now on. The step
+         // that gives levels their memory goes by this answer.
+         let held = if self.on_demand {
+-            use std::sync::atomic::Ordering::Relaxed;
+             let judged = self.judgement();
+-            self.judged[0].store(judged[0], Relaxed);
+-            self.judged[1].store(judged[1], Relaxed);
+             let held = self.held_levels(judged);
+-            self.detiled.store(held, Relaxed);
++            self.remember_levels(judged, held);
+             held
+         } else {
+             u32::MAX
+         };
++        self.detile_levels(tiled, held);
++    }
++
++    fn remember_levels(&self, judged: [u64; 2], held: u32) {
++        use std::sync::atomic::Ordering::Relaxed;
++        self.judged[0].store(judged[0], Relaxed);
++        self.judged[1].store(judged[1], Relaxed);
++        self.detiled.store(held, Relaxed);
++    }
++
++    fn detile_levels(&self, tiled: &[u8], held: u32) {
++        self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+         #[cfg(feature = "diagnostics")]
+         if tiled.iter().all(|&b| b == 0) {
+             tracing::debug!(
 diff --git a/crates/victory-gpu/src/watch.rs b/crates/victory-gpu/src/watch.rs
 index 151de09037554acac00cc8e1e3a947cf650908ea..eb7e931dee33c8e6b004c0a740294fbce5272dfd 100644
 --- a/crates/victory-gpu/src/watch.rs
