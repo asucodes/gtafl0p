@@ -99,7 +99,7 @@ $experiment = @{
 .\scripts\play-4050.ps1 -Exe 'C:\Path\To\Your\Title.exe' -FrameCsv '.\presents.csv' -More $experiment
 ~~~
 
-Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `779dffcbf4bed45b3e85ab576756fa8608559ec8`.
+Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `d646840eaf05c61df340b3e84d1ad1b0f73fe5d7`.
 
 ## Shader output and pipeline failures
 
@@ -147,6 +147,10 @@ One Series S boot with the switch enabled closed normally after the timed window
 A diagnostic Series S run alternated asynchronous submission every 25 seconds, with one present allowed in the queue. The gameplay timing gate required 18 of 24 consecutive presents to reach at least 1,000 draws. The timed window contained 320 heavy host presents, with 149.5 ms median and 1,421.8 ms p95 across both modes. The run closed normally.
 
 In two later phases, the title-side median was 215.0 ms with the worker off and 119.4 ms with it on. Those phases averaged 4,804 and 4,397 draws. Earlier phases overlapped loading and there was no full switch-back phase after that comparison. The setting stays experimental. Image quality and input latency still need direct verification.
+
+### Diagnose a material or lighting defect
+
+The diagnostics build can capture just the chosen frames. Set `VICTORY_CAPTURE_WORLD=1` and `VICTORY_CAPTURE_OFFSETS=80,160,240` with a fresh local `VICTORY_CAPTURE` folder. The offsets are counted from the first frame with at least 500 draws. Use `VICTORY_DUMP_TARGETS=1` for end-of-frame render targets and keep the corresponding operation logs. Set `VICTORY_CAPTURE_BAKE_TARGETS=1` to read back up to 12 bake targets in each of the first two bake frames. The log identifies the resources and the pipeline that registered them. Readback synchronizes GPU work, so use a separate run for performance measurements. Verified on the RTX 4050 Laptop with two sets of bake attachments and three selected prologue frames. These captures did not reproduce the exact reported face shot.
 
 ## Credits and license
 

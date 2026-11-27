@@ -1,3 +1,145 @@
+diff --git a/crates/victory-gpu/src/capture.rs b/crates/victory-gpu/src/capture.rs
+index 937f5600d85c7e93826c002a0e2998b288dc716f..47536acadd916673691b0bb2b34393e1027ccbe3 100644
+--- a/crates/victory-gpu/src/capture.rs
++++ b/crates/victory-gpu/src/capture.rs
+@@ -47,7 +47,19 @@ pub(crate) fn listed(n: u64) -> bool {
+     });
+     let first = WORLD.load(std::sync::atomic::Ordering::Relaxed);
+     let after = n.wrapping_sub(first);
+-    named || first != u64::MAX && ([2, 6, 30, 80].contains(&after) || also.contains(&after))
++    named || first != u64::MAX && match world_offsets() {
++        Some(offsets) => offsets.contains(&after),
++        None => [2, 6, 30, 80].contains(&after) || also.contains(&after),
++    }
++}
++
++/// Explicit offsets replace the default world offsets and periodic PNGs.
++fn world_offsets() -> Option<&'static [u64]> {
++    static OFFSETS: std::sync::OnceLock<Option<Vec<u64>>> = std::sync::OnceLock::new();
++    OFFSETS.get_or_init(|| {
++        Some(std::env::var("VICTORY_CAPTURE_OFFSETS").ok()?
++            .split(',').filter_map(|value| value.trim().parse().ok()).collect())
++    }).as_deref()
+ }
+ 
+ /// With a capture folder, for the frames [`listed`]: `what` is added to
+@@ -65,7 +77,9 @@ pub(crate) fn op(list: usize, what: impl FnOnce() -> String) {
+         // it starts (`before-world-ops.txt`): what the title drew just
+         // before (the title shows a title card there, whose text
+         // did not show).
+-        if world_on() && WORLD.load(std::sync::atomic::Ordering::Relaxed) == u64::MAX {
++        if world_offsets().is_none() && world_on()
++            && WORLD.load(std::sync::atomic::Ordering::Relaxed) == u64::MAX
++        {
+             // At most 300 lines of a frame: the world's first frame alone
+             // (thousands of operations, recorded before it is known to be
+             // the world's) pushed everything before it out.
+@@ -132,7 +146,11 @@ pub(crate) fn frame_drew(frame: u64, drawn: u64) {
+         && drawn.saturating_sub(before) >= 500
+         && WORLD.compare_exchange(u64::MAX, frame, Relaxed, Relaxed).is_ok()
+     {
+-        tracing::info!(frame, "the first frame of 500 draws or more: frames {} and {} are captured", frame + 2, frame + 6);
++        if let Some(offsets) = world_offsets() {
++            tracing::info!(frame, ?offsets, "the first frame of 500 draws or more anchors the selected captures");
++        } else {
++            tracing::info!(frame, "the first frame of 500 draws or more: frames {} and {} are captured", frame + 2, frame + 6);
++        }
+         #[cfg(feature = "diagnostics")]
+         if let Some(folder) = folder() {
+             let lines: Vec<String> = std::mem::take(&mut *RING.lock().unwrap_or_else(|e| e.into_inner())).into();
+@@ -144,6 +162,9 @@ pub(crate) fn frame_drew(frame: u64, drawn: u64) {
+ 
+ /// Whether frame `n` is saved.
+ pub(crate) fn wanted(n: u64) -> bool {
++    if world_offsets().is_some() {
++        return folder().is_some() && (listed(n) || bake_frame(n));
++    }
+     // Before the world, with `VICTORY_CAPTURE_WORLD`: every 16th frame too
+     // (small pictures of menus, loading screens and title cards).
+     let before_world = world_on() && n.is_multiple_of(16) && WORLD.load(std::sync::atomic::Ordering::Relaxed) == u64::MAX;
+@@ -353,8 +374,61 @@ pub(crate) fn save_read_back(
+ /// structure: floats scaled by their largest value, depth by its range).
+ /// The host copies are held: the title may release a target before the
+ /// frame is presented.
+-static TARGETS: std::sync::Mutex<Vec<(usize, std::sync::Arc<crate::resource::HostTexture>)>> =
+-    std::sync::Mutex::new(Vec::new());
++type Target = (usize, std::sync::Arc<crate::resource::HostTexture>);
++
++static TARGETS: std::sync::Mutex<Vec<Target>> = std::sync::Mutex::new(Vec::new());
++
++struct BakeTargets {
++    frame: u64,
++    targets: Vec<Target>,
++}
++
++static BAKES: std::sync::Mutex<Vec<BakeTargets>> = std::sync::Mutex::new(Vec::new());
++
++fn bake_on() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| folder().is_some() && crate::switch::on("VICTORY_CAPTURE_BAKE_TARGETS"))
++}
++
++pub(crate) fn bake_frame(frame: u64) -> bool {
++    bake_on() && BAKES.lock().unwrap_or_else(|e| e.into_inner())
++        .iter().any(|bake| bake.frame == frame)
++}
++
++/// Records the first two frames with a decoration bake. Its targets were
++/// bound before the draw identified the bake, so record them explicitly.
++pub(crate) fn note_bake(frame: u64, pipeline: &str, resources: &[usize]) {
++    const MAX_FRAMES: usize = 2;
++    const MAX_TARGETS: usize = 12;
++    if !bake_on() || resources.is_empty() {
++        return;
++    }
++    let mut bakes = BAKES.lock().unwrap_or_else(|e| e.into_inner());
++    let index = if let Some(index) = bakes.iter().position(|bake| bake.frame == frame) {
++        index
++    } else if bakes.len() < MAX_FRAMES {
++        bakes.push(BakeTargets { frame, targets: Vec::new() });
++        bakes.len() - 1
++    } else {
++        return;
++    };
++    let targets = &mut bakes[index].targets;
++    let before = targets.len();
++    for &resource in resources {
++        if targets.len() >= MAX_TARGETS {
++            break;
++        }
++        if !targets.iter().any(|&(known, _)| known == resource)
++            && let Some(copy) = crate::resource::made_copy(resource as crate::object::This)
++        {
++            targets.push((resource, copy));
++        }
++    }
++    if targets.len() > before {
++        let added: Vec<_> = targets[before..].iter().map(|(resource, _)| format!("{resource:#x}")).collect();
++        tracing::info!(frame, pipeline, ?added, "decoration bake targets queued for readback");
++    }
++}
+ 
+ fn dump_on() -> bool {
+     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+@@ -377,7 +451,17 @@ pub(crate) fn note_target(resource: crate::object::This) {
+ /// At the present of frame `frame`: saves the noted targets.
+ pub(crate) fn dump_targets(frame: u64) {
+     use std::sync::atomic::Ordering::Relaxed;
+-    let targets = std::mem::take(&mut *TARGETS.lock().unwrap_or_else(|e| e.into_inner()));
++    let mut targets = std::mem::take(&mut *TARGETS.lock().unwrap_or_else(|e| e.into_inner()));
++    if bake_on() {
++        let mut bakes = BAKES.lock().unwrap_or_else(|e| e.into_inner());
++        if let Some(bake) = bakes.iter_mut().find(|bake| bake.frame == frame) {
++            for target in std::mem::take(&mut bake.targets) {
++                if !targets.iter().any(|known| known.0 == target.0) {
++                    targets.push(target);
++                }
++            }
++        }
++    }
+     let Some(host) = crate::host::host() else { return };
+     for (i, (resource, copy)) in targets.iter().enumerate() {
+         let texture = &copy.texture;
 diff --git a/crates/victory-gpu/src/cores.rs b/crates/victory-gpu/src/cores.rs
 index 0e1ad30c78169f4cea63fe1f15944e83e834600e..f6a797fc36c5f11c9d5e756fdecfe04e5d50d934 100644
 --- a/crates/victory-gpu/src/cores.rs
@@ -270,7 +412,7 @@ index 9045bb047066ccc30702080c16096a97dd0567ab..3661f333b62174ecd2b60279efa52f58
      }
  
 diff --git a/crates/victory-gpu/src/draw.rs b/crates/victory-gpu/src/draw.rs
-index c09e6930f2a53d36df86f2ae9d046c91cd2688c9..0d7ea537e656d3e0c5e71b1831df0f96ebc2eb41 100644
+index c09e6930f2a53d36df86f2ae9d046c91cd2688c9..68864c4a9c4e767449ea6f2fd0680d78afec3672 100644
 --- a/crates/victory-gpu/src/draw.rs
 +++ b/crates/victory-gpu/src/draw.rs
 @@ -543,9 +543,9 @@ pub(crate) struct State {
@@ -326,7 +468,16 @@ index c09e6930f2a53d36df86f2ae9d046c91cd2688c9..0d7ea537e656d3e0c5e71b1831df0f96
                  self.root_srv_slots
                      .insert(key, (index, shadow.as_ref().map(|(_, s)| s.clone())));
                  match &shadow {
-@@ -4565,7 +4565,7 @@ impl State {
+@@ -2838,6 +2838,8 @@ impl State {
+             return;
+         };
+         if is_bake {
++            #[cfg(feature = "diagnostics")]
++            crate::capture::note_bake(crate::queue::presented() + 1, &p.name, &self.targets);
+             let began = std::time::Instant::now();
+             let mut bake_slot = BAKE_UPLOAD.lock().unwrap_or_else(|e| e.into_inner());
+             let gpu = crate::host::host();
+@@ -4565,7 +4567,7 @@ impl State {
              };
              self.fresh_tables.insert(key, FreshTable { first, epoch: 0, ready: Vec::new() });
              self.dynamic
@@ -1509,6 +1660,19 @@ index 22edcf3d9a7e95cf641ffaf74e3e2007a86da113..cfbb13b206f1f5aaea0e4dcd24f929cc
              assert_eq!(REGIONS.lock().unwrap().len(), regions, "one region for the stretch");
              assert_eq!(second.bias, 0);
              // The title's views may change under the heap.
+diff --git a/crates/victory-gpu/src/queue.rs b/crates/victory-gpu/src/queue.rs
+index 93968e1f3fd18f0e4585c061aa6c1143c084a4ef..af45ac88be29ea86f5a4aa96000298dbb2ae2539 100644
+--- a/crates/victory-gpu/src/queue.rs
++++ b/crates/victory-gpu/src/queue.rs
+@@ -993,7 +993,7 @@ extern "system" fn present(
+     #[cfg(all(windows, feature = "diagnostics"))]
+     {
+         crate::capture::frame_drew(frame, crate::draw::drawn());
+-        if crate::capture::listed(frame) {
++        if crate::capture::listed(frame) || crate::capture::bake_frame(frame) {
+             before_sync();
+             crate::capture::dump_targets(frame);
+         }
 diff --git a/crates/victory-gpu/src/resource.rs b/crates/victory-gpu/src/resource.rs
 index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..8eb49fef173e2502fea9b7ce83c072357381c3c9 100644
 --- a/crates/victory-gpu/src/resource.rs
