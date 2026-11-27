@@ -37,7 +37,14 @@ These are startup samples with the same 120-second, 1,000-draw selection and nea
 
 The release includes an opt-in replacement for collecting dirty-page information at submission time. Set `VICTORY_WATCH_BATCH=1` with `VICTORY_ASK_ONCE=1` to group queries inside a Windows allocation. Rejected combined queries fall back to their original subranges, and mapped views still use the existing guard path. Only a successful kernel query publishes coverage. Both modes use the indexed coverage lookup.
 
-The 51 write-watch tests passed on Windows. They cover conflicting mappings, address aliases, overlapping queries, and a real Windows fixture that recovered the exact dirty 4 KiB parts from two reservations with two kernel queries. At 512 disjoint spans, a synthetic lookup test on the laptop took 5.8 ms for 240,000 lookups with the index and 65.0 ms with a linear scan. Those measurements isolate the lookup. The replacement planner remains experimental pending the game comparison.
+The 51 write-watch tests passed on Windows. They cover conflicting mappings, address aliases, overlapping queries, and a real Windows fixture that recovered the exact dirty 4 KiB parts from two reservations with two kernel queries. At 512 disjoint spans, a synthetic lookup test on the laptop took 5.8 ms for 240,000 lookups with the index and 65.0 ms with a linear scan. Those measurements isolate the lookup.
+
+| Planner | Samples | Median present interval | p95 present interval | Lowest free physical RAM |
+| --- | ---: | ---: | ---: | ---: |
+| Existing | 93 | 547.1 ms | 3,605.9 ms | 65 MiB |
+| Allocation-aware | 226 | 152.6 ms | 2,090.6 ms | 70 MiB |
+
+Both captures used the same release executable and copied starting profile with 4 MiB mirrors, direct constants memory and the 2 MiB allocator sections. Samples are host presents with at least 1,000 draws during the first 120 seconds from the first such present. Both timed tests completed title suspension and exited with code 0. This is one boot per mode. Cache, streaming and scene progression can vary, so keep the planner opt-in. The measured write-watch phase was higher in the allocation-aware run, and both runs still had seconds-long stalls and dropped draws. [Existing planner samples](diagnostics/rtx4050-2026-11-27-watch-legacy.tsv.txt) · [Allocation-aware samples](diagnostics/rtx4050-2026-11-27-watch-batch.tsv.txt)
 
 ## Changes in our patch
 
