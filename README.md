@@ -99,7 +99,7 @@ $experiment = @{
 .\scripts\play-4050.ps1 -Exe 'C:\Path\To\Your\Title.exe' -FrameCsv '.\presents.csv' -More $experiment
 ~~~
 
-Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `c968dbe0774ad355ab0c9fe92eb2caf881c4ece1`.
+Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `cec097a826095c12b3e954ee4126b3a472e7b0fd`.
 
 ## Shader output and pipeline failures
 
@@ -204,6 +204,12 @@ An RTX 4050 Laptop comparison used the same diagnostics executable, copied save 
 | Cumulative preludes created near window end | 692 | 255 |
 
 Both runs reached three frame checkpoints and exited normally. The reported creation totals include startup before the scene. The captured frames reached different points in the opening transition, with a comparable prison-window composition at the last checkpoint. The allocation and preparation counters support keeping the pool as an option. The pair leaves sustained FPS and rendering fidelity unverified.
+
+### Bindless texture updates through shared title memory
+
+The CPU write path now queues bindless texture updates through tracked aliases of the written range. The RTX 4050 texture-queue regression originally scheduled zero updates for a texture bound through a second view of those bytes. With the change it schedules the expected slot. The direct remap and existing alias write-watch regressions also passed.
+
+A diagnostics build reached all three opening checkpoints and exited normally. Its 87 draw-heavy presents at offsets 9 through 119 measured 149.91 ms median and 388.68 ms p95, with zero frames at or below 33.33 ms. The final picture captured the dark-face close-up. The preceding pool-on run had reached a later prison-window view at that offset, so the timing difference is not a matched performance result. Fingerprint checks still found textures with aliased backing that had changed without a queued update. The lighting defect persists.
 
 ## Current VIctory-NVIDIA comparison
 

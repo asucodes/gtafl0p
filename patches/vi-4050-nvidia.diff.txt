@@ -373,7 +373,7 @@ index 140a0cfe3985743c6612e4c95db5b66509d50517..cf0d5e2a9772ff3ff9dd747986271ddc
  }
  
 diff --git a/crates/victory-gpu/src/descriptor/host.rs b/crates/victory-gpu/src/descriptor/host.rs
-index 9045bb047066ccc30702080c16096a97dd0567ab..af2485ecb011794de655ce42225455ec29344a17 100644
+index 9045bb047066ccc30702080c16096a97dd0567ab..18c8a909ee9e19c851610c602e5d0b99febdd322 100644
 --- a/crates/victory-gpu/src/descriptor/host.rs
 +++ b/crates/victory-gpu/src/descriptor/host.rs
 @@ -111,7 +111,13 @@ impl Made {
@@ -687,7 +687,46 @@ index 9045bb047066ccc30702080c16096a97dd0567ab..af2485ecb011794de655ce42225455ec
      /// A view of a host copy that begins at a later level shows the same
      /// levels of it.
      #[test]
-@@ -6526,11 +6641,29 @@ mod tests {
+@@ -6272,6 +6387,38 @@ mod tests {
+         assert_eq!(slots(u64::MAX), [2]);
+     }
+ 
++    /// An announced CPU write through a different address of the same
++    /// physical page makes the bindless slot due.
++    #[test]
++    fn cpu_write_through_alias_makes_bindless_texture_due() {
++        let heap = HostHeap::new(false, 8).expect("host device for texture queue");
++        let at = 0x7fee_4000_0000usize;
++        let alias = at + 0x100_0000;
++        let bytes = 0x10000;
++        let section = at;
++        let mut desc = [0u32; 16];
++        (desc[10], desc[11]) = (at as u32, (at >> 32) as u32);
++        let view = View::Placed(false, [3, 0, 0, 0, 64, 0, 64, 0x1_0001, 98, 1, 0, 0x105, 0, 0], desc);
++        assert!(heap.note_buffer(1, Some(&view), false).is_empty());
++        let (slot, write) = heap.texture_slots_due(u64::MAX, 8).0[0];
++        heap.texture_slot_done(slot, write, None);
++
++        // The queue only consumes the mapping records. No memory is read or
++        // protected at these addresses.
++        crate::inplace::title_memory_view(at, bytes, section, 0);
++        crate::inplace::title_memory_view(alias, bytes, section, 0);
++        crate::watch::writing(alias + 32, 8);
++        let due = heap.texture_slots_remapped(50);
++        crate::inplace::views_gone(alias, bytes);
++        crate::inplace::views_gone(at, bytes);
++
++        assert_eq!(due, 1);
++        assert!(heap.texture_slots_due(50, 8).0.is_empty());
++        let due = heap.texture_slots_due(51, 8).0;
++        assert_eq!(due.len(), 1);
++        assert_eq!(due[0].0, 1);
++    }
++
+     /// A write of no placed texture view forgets the slot in the spans
+     /// whether it goes by their lock or not (`spans_quick`): slots that are
+     /// in them stay marked, also one another's view made stale.
+@@ -6526,11 +6673,29 @@ mod tests {
          assert_eq!((a, b), (4, 4 + heap.dynamic - 100));
          // 40 left at the end: 50 do not fit until something is given back.
          assert_eq!(heap.dynamic(50), None);
@@ -718,7 +757,7 @@ index 9045bb047066ccc30702080c16096a97dd0567ab..af2485ecb011794de655ce42225455ec
      #[test]
      fn dynamic_search_can_find_a_run_across_the_cursor() {
          let Some(heap) = HostHeap::new(false, 4) else {
-@@ -6544,17 +6677,17 @@ mod tests {
+@@ -6544,17 +6709,17 @@ mod tests {
          assert_eq!((first, left, right, rest), (4, 5, 7, 9));
  
          // Reallocating the left half puts the cursor back in the middle.
@@ -741,7 +780,7 @@ index 9045bb047066ccc30702080c16096a97dd0567ab..af2485ecb011794de655ce42225455ec
          assert_eq!(heap.dynamic(2), None);
      }
  
-@@ -6726,6 +6859,32 @@ pub(crate) fn list_views() -> bool {
+@@ -6726,6 +6891,32 @@ pub(crate) fn list_views() -> bool {
  mod bake_flip_tests {
      use super::*;
  
@@ -4183,7 +4222,7 @@ index 17955a108c0b678eee42a8ba01af0ad4337263f3..099f9bf478e1fa56e1ab92234684f875
          if tiled.iter().all(|&b| b == 0) {
              tracing::debug!(
 diff --git a/crates/victory-gpu/src/watch.rs b/crates/victory-gpu/src/watch.rs
-index 151de09037554acac00cc8e1e3a947cf650908ea..eb7e931dee33c8e6b004c0a740294fbce5272dfd 100644
+index 151de09037554acac00cc8e1e3a947cf650908ea..2e98b677eab9d14991608c21b573ffb41631515f 100644
 --- a/crates/victory-gpu/src/watch.rs
 +++ b/crates/victory-gpu/src/watch.rs
 @@ -30,12 +30,17 @@ use std::collections::{BTreeMap, BTreeSet};
@@ -4437,7 +4476,50 @@ index 151de09037554acac00cc8e1e3a947cf650908ea..eb7e931dee33c8e6b004c0a740294fbc
      (ranged != 0 || taken.iter().all(|&at| at != 0))
          && j.written.range(first..last).all(|(&page, &write)| write <= taken[page - first].max(ranged))
  }
-@@ -3247,8 +3336,9 @@ mod parts_tests {
+@@ -2409,6 +2498,24 @@ fn unguard(g: &mut Guards, blocks: &[usize]) {
+     }
+ }
+ 
++/// Queues placed textures whose bytes a host write can change. The
++/// destination and each view of the same physical bytes need the event;
++/// the buffer write journal and the bindless texture queue are separate.
++fn texture_memory_writing(at: usize, len: usize) {
++    if len == 0 {
++        return;
++    }
++    crate::descriptor::host::remapped(at, len);
++    let end = at.saturating_add(len);
++    for (page, aliases) in elsewhere(at, len) {
++        let start = at.max(page);
++        let bytes = end.min(page + BLOCK) - start;
++        for alias in aliases {
++            crate::descriptor::host::remapped(alias + (start - page), bytes);
++        }
++    }
++}
++
+ /// Before our own write into title memory `[at, at + len)` through the
+ /// kernel (which does not fault into our handler): opens its guarded blocks.
+ /// The runtime calls it (as `kernel_will_write`) before the title's kernel
+@@ -2427,7 +2534,7 @@ pub fn writing(at: usize, len: usize) {
+         let _ = opened;
+     }
+     // A placed texture there changes with no descriptor written.
+-    crate::descriptor::host::remapped(at, len);
++    texture_memory_writing(at, len);
+ }
+ 
+ /// The kernel writes title memory `[at, at + len)` until what this returns
+@@ -2459,7 +2566,7 @@ pub fn kernel_writing(at: usize, len: usize) -> KernelWrite {
+             g.kernel.push((first, last));
+         }
+     }
+-    crate::descriptor::host::remapped(at, len);
++    texture_memory_writing(at, len);
+     KernelWrite(first, if len == 0 { first } else { last })
+ }
+ 
+@@ -3247,8 +3354,9 @@ mod parts_tests {
      fn the_parts_of_a_page_written_since_it_was_taken() {
          let mut j = Journal {
              written: BTreeMap::new(),
@@ -4448,7 +4530,7 @@ index 151de09037554acac00cc8e1e3a947cf650908ea..eb7e931dee33c8e6b004c0a740294fbc
              ahead_asked: 0,
              kept: false,
          };
-@@ -3277,7 +3367,6 @@ mod tests {
+@@ -3277,7 +3385,6 @@ mod tests {
      use windows_sys::Win32::System::Memory::{
          MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
      };
