@@ -33,6 +33,12 @@ Both mirror runs used the Series S profile, DLSS Performance, no generated frame
 
 These are startup samples with the same 120-second, 1,000-draw selection and nearest-rank method described above. The 4 MiB run used the shutdown fix and a warmer pipeline cache. Gameplay progression and an isolated performance effect remain unverified. The mirror grid stays at 4 MiB, with an optional release census for logical mirror sizes. [1 MiB samples](diagnostics/rtx4050-2026-11-27-mirror-1024k.tsv.txt) ? [4 MiB samples](diagnostics/rtx4050-2026-11-27-mirror-4096k.tsv.txt)
 
+## Submission memory planner
+
+The release includes an opt-in replacement for collecting dirty-page information at submission time. Set `VICTORY_WATCH_BATCH=1` with `VICTORY_ASK_ONCE=1` to group queries inside a Windows allocation. Rejected combined queries fall back to their original subranges, and mapped views still use the existing guard path. Only a successful kernel query publishes coverage. Both modes use the indexed coverage lookup.
+
+The 51 write-watch tests passed on Windows. They cover conflicting mappings, address aliases, overlapping queries, and a real Windows fixture that recovered the exact dirty 4 KiB parts from two reservations with two kernel queries. At 512 disjoint spans, a synthetic lookup test on the laptop took 5.8 ms for 240,000 lookups with the index and 65.0 ms with a linear scan. Those measurements isolate the lookup. The replacement planner remains experimental pending the game comparison.
+
 ## Changes in our patch
 
 - Add `scripts/play-4050.ps1` with the Series S profile, DLSS Performance, an NVIDIA adapter selection, host wave size 32, a 70% texture admission limit, and 1 GiB each for the buffer and render-target settings. Frame generation defaults to disabled. `-More` accepts explicit experimental overrides and `-FrameCsv` records present timings.
@@ -46,6 +52,8 @@ These are startup samples with the same 120-second, 1,000-draw selection and nea
 
 - Use shared locking when a retained buffer mirror already covers the lookup, and recheck under the write lock before creating a missing window. Enable VICTORY_SHADOW_CENSUS=1 to log logical mirror and staging sizes.
 - Route a direct main-window close through the title's existing shutdown lifecycle. Preserve auxiliary-window close handling and test the main-window process exit.
+
+- Add a submission-memory planner that groups write-watch queries by allocation, retries individual ranges when Windows rejects the batch, and reports counters in a release build.
 
 ## Reproduce the laptop experiment
 
@@ -74,7 +82,7 @@ $experiment = @{
 .\scripts\play-4050.ps1 -Exe 'C:\Path\To\Your\Title.exe' -FrameCsv '.\presents.csv' -More $experiment
 ~~~
 
-Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `10bff2767c4c8b30b9ea976c0f11a1d8f44c1d67`.
+Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `595a9741024a1cc7faf205f04945ac9d50dc1dec`.
 
 ## Credits and license
 
