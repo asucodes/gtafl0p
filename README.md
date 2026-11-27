@@ -99,7 +99,7 @@ $experiment = @{
 .\scripts\play-4050.ps1 -Exe 'C:\Path\To\Your\Title.exe' -FrameCsv '.\presents.csv' -More $experiment
 ~~~
 
-Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `60c961ab5463055f180f6e244480f3a965569c88`.
+Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `5ce550fc0ab04150054dcf94e2477e905ea1c8b4`.
 
 ## Shader output and pipeline failures
 
@@ -155,6 +155,10 @@ The diagnostics build can capture just the chosen frames. Set `VICTORY_CAPTURE_W
 ### Texture upload and descriptor generations
 
 The upload paths keep the descriptor generation they selected. A deferred completion can expose that view only while the title slot still names that generation. The immediate path keeps its existing GPU fence and descriptor-retirement handling. This prevents an old upload from making a replacement texture appear ready. On the RTX 4050, three targeted tests passed, including a regression that rewrites the slot between selection and completion registration. The tests verify the resource handoff. The rebuilt renderer then reached the prologue, captured three frames and exited normally. Its first 64 heavy presents measured 737.4 ms median and 3,100.5 ms p95. A later 79-present window measured 90.5 ms median and 576.3 ms p95. Washed-out exposure and purple artifacts are still visible. The smoke test establishes that the renderer runs with the change.
+
+### Opaque reflection depth
+
+For a controlled test, add VICTORY_AMBIENT_LINEAR_REFLECTION_DEPTH=1 using the launcher's -More argument. The renderer accepts the traced opaque shader's same-size R32_FLOAT depth input and reconstructs positions from linear depth. Six ambient tests passed on the RTX 4050. The live run logged 210 reflection fallback dispatches across 11 reported intervals, compared with 3 across 11 intervals in the preceding run. It captured all three frames and exited normally. Its later 79-present window measured 90.7 ms median and 579.8 ms p95. The captures still show exposure artifacts. Differences in camera and scene timing prevent a visual comparison, so this path remains opt-in.
 
 ## Current VIctory-NVIDIA comparison
 
