@@ -190,7 +190,20 @@ Two isolated runs used the same executable and copied save. The late prison-wind
 
 Diagnostics now split list preparation into prefix refreshes, deferred steps, upload choices, state preludes, list gathering and final refreshes. A short RTX 4050 startup capture showed one interval at 778.34 ms per frame in state preludes and 283 preludes created by the last sample. The window closed before the steady scene.
 
-Set `VICTORY_PRELUDE_POOL=1` with lazy preludes to try the bounded pool of completed allocators and command lists. The RTX 4050 known-value test passed with pooling off and on. With it on, two retired pairs were reused and both distinct texel patterns matched. This verifies the reuse path and leaves gameplay performance to be measured.
+Set `VICTORY_PRELUDE_POOL=1` with lazy preludes to try the bounded pool of completed allocators and command lists. The RTX 4050 known-value test passed with pooling off and on. With it on, two retired pairs were reused and both distinct texel patterns matched. The reuse path is verified.
+
+An RTX 4050 Laptop comparison used the same diagnostics executable, copied save and scripted input. At offsets 9 through 119 from the first draw-heavy frame, each run had 87 presents with at least 1,000 draws.
+
+| Opening scene measurement | Pool off | Pool on |
+| --- | ---: | ---: |
+| Median frame time | 457.97 ms | 327.03 ms |
+| p95 frame time | 2,937.28 ms | 2,810.73 ms |
+| Present intervals at or below 33.33 ms | 0 of 87 | 0 of 87 |
+| State-prelude time, median of interval means | 117.98 ms | 22.59 ms |
+| Final refresh time, median of interval means | 118.85 ms | 120.50 ms |
+| Cumulative preludes created near window end | 692 | 255 |
+
+Both runs reached three frame checkpoints and exited normally. The reported creation totals include startup before the scene. The captured frames reached different points in the opening transition, with a comparable prison-window composition at the last checkpoint. The allocation and preparation counters support keeping the pool as an option. The pair leaves sustained FPS and rendering fidelity unverified.
 
 ## Current VIctory-NVIDIA comparison
 
