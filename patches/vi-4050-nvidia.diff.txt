@@ -1047,7 +1047,7 @@ index c09e6930f2a53d36df86f2ae9d046c91cd2688c9..112de14f99a420ff3ac83b7d312b3dc6
              None => format!(
                  "uav resource {r:#x} buffer {:?}",
 diff --git a/crates/victory-gpu/src/host.rs b/crates/victory-gpu/src/host.rs
-index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135ddef617b00d 100644
+index b4baed734b22cb888ce2fe6234fec12acc4baa8b..7bdcb6537c9641d0baff1102f0ee7aa62224c7a5 100644
 --- a/crates/victory-gpu/src/host.rs
 +++ b/crates/victory-gpu/src/host.rs
 @@ -5,7 +5,7 @@
@@ -1059,7 +1059,16 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
  use std::sync::{Mutex, OnceLock};
  
  use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-@@ -911,7 +911,16 @@ fn create() -> windows::core::Result<Host> {
+@@ -61,6 +61,8 @@ pub(crate) struct Host {
+     /// omits a view or sampler heap while using directly-indexed root signatures.
+     fallback_view: OnceLock<Option<ID3D12DescriptorHeap>>,
+     fallback_sampler: OnceLock<Option<ID3D12DescriptorHeap>>,
++    /// Fence-complete state preludes available to another title list.
++    spare_preludes: Mutex<Vec<Prelude>>,
+ }
+ 
+ // SAFETY: D3D12 devices, queues, fences and descriptor heaps are
+@@ -911,7 +913,16 @@ fn create() -> windows::core::Result<Host> {
              D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device)?;
              tracing::info!("host device on the software adapter (WARP)");
          } else {
@@ -1077,7 +1086,15 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
              // Whether a GPU hang ends the run or freezes the PC (#1054).
              crate::tdr::log();
          }
-@@ -1014,6 +1023,84 @@ impl Host {
+@@ -1001,6 +1012,7 @@ fn create() -> windows::core::Result<Host> {
+             adapter,
+             fallback_view: OnceLock::new(),
+             fallback_sampler: OnceLock::new(),
++            spare_preludes: Mutex::default(),
+         })
+     }
+ }
+@@ -1014,6 +1026,84 @@ impl Host {
      }
  }
  
@@ -1162,7 +1179,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
  /// DXGI may return hardware for `EnumWarpAdapter` (notably under Proton).
  /// Reject it before creating a device in diagnostics' software-only mode.
  pub(crate) fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
-@@ -1038,6 +1125,18 @@ pub(crate) fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
+@@ -1038,6 +1128,18 @@ pub(crate) fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
  
  #[cfg(test)]
  mod tests {
@@ -1181,7 +1198,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
      /// A list of ours is found by its name, with the debug layer's note or not.
      #[cfg(feature = "diagnostics")]
      #[test]
-@@ -1189,6 +1288,37 @@ mod tests {
+@@ -1189,6 +1291,37 @@ mod tests {
          }
      }
  
@@ -1219,7 +1236,29 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
      use super::*;
  
      #[test]
-@@ -1347,9 +1477,99 @@ type Note = (String, Option<(u64, u64)>);
+@@ -1242,7 +1375,7 @@ pub(crate) struct HostList {
+     twins: Mutex<std::collections::HashMap<usize, TwinUse>>,
+     /// The list that runs those transitions just before this one, made
+     /// when the list first has such transitions ([`lazy_prelude`]).
+-    prelude: OnceLock<Option<Prelude>>,
++    prelude: Mutex<Option<Prelude>>,
+     /// The pipelines the list binds, for reports of slow submissions.
+     pipelines: std::sync::Arc<Mutex<std::collections::BTreeSet<String>>>,
+     /// What its indirect executions ran, for the report of a removed device.
+@@ -1301,6 +1434,12 @@ pub(crate) struct HostList {
+ /// A list's prelude: an allocator and a closed list.
+ type Prelude = (ID3D12CommandAllocator, ID3D12GraphicsCommandList);
+ 
++pub(crate) static PRELUDES_REUSED: AtomicU64 = AtomicU64::new(0);
++
++fn pool_preludes() -> bool {
++    lazy_prelude() && crate::asked_for!("VICTORY_PRELUDE_POOL")
++}
++
+ /// Whether the new host list each of the title's lists gets when it is
+ /// submitted is left open for the title's next reset ([`HostList::leave_open`];
+ /// `VICTORY_FRESH_OPEN=0`: closed at once and reset again, as before). What
+@@ -1347,9 +1486,99 @@ type Note = (String, Option<(u64, u64)>);
  
  type States = std::collections::HashMap<
      usize,
@@ -1320,7 +1359,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
  /// What a list does with a depth texture that has a colour twin
  /// ([`crate::resource::Twin`]). Lists are recorded on many threads and run
  /// in submission order, so a list cannot know which side an earlier list
-@@ -2348,6 +2568,8 @@ enum Step {
+@@ -2348,6 +2577,8 @@ enum Step {
      /// Brings a texture's staging buffer up to date: once per submission,
      /// whichever lists sample it, until a `Copy` or `Run` intervenes.
      Texture(std::sync::Arc<crate::texture::Staging>),
@@ -1329,7 +1368,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
      /// Reads a CPU-written linear movie plane into a per-list upload buffer.
      Plane((usize, usize), Box<dyn Fn() + Send>),
      /// A title buffer copy that the list does on the card ([`place`]): what
-@@ -3100,7 +3322,7 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
+@@ -3100,7 +3331,7 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
                          return Some(WHY_READ);
                      }
                  }
@@ -1338,7 +1377,73 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
                      let (at, len) = staging.memory();
                      if touches(written, at, at + len) {
                          if count {
-@@ -6468,6 +6690,7 @@ impl HostList {
+@@ -4187,6 +4418,12 @@ impl Host {
+ 
+     /// An allocator and a closed list for a prelude.
+     fn make_prelude(&self) -> Option<Prelude> {
++        if pool_preludes()
++            && let Some(prelude) = self.spare_preludes.lock().unwrap_or_else(|e| e.into_inner()).pop()
++        {
++            PRELUDES_REUSED.fetch_add(1, Ordering::Relaxed);
++            return Some(prelude);
++        }
+         // SAFETY: plain object creation.
+         let made: windows::core::Result<Prelude> = unsafe {
+             (|| {
+@@ -4221,10 +4458,7 @@ impl Host {
+                 &allocator,
+                 None,
+             )?;
+-            let prelude = OnceLock::new();
+-            if !lazy_prelude() {
+-                let _ = prelude.set(self.make_prelude());
+-            }
++            let prelude = Mutex::new(if lazy_prelude() { None } else { self.make_prelude() });
+             #[cfg(feature = "diagnostics")]
+             let notes = std::sync::Arc::<Mutex<Vec<Note>>>::default();
+             let pipelines = std::sync::Arc::<Mutex<std::collections::BTreeSet<String>>>::default();
+@@ -5809,26 +6043,40 @@ impl Host {
+         // What flights in the air may write.
+         let air = line().written.clone();
+         stage.next("submit: refreshes ahead of writes");
++        #[cfg(feature = "diagnostics")]
++        let prep = Split::begin();
+         if refresh_front() {
+             batch.refresh_front(runs, &parts);
+         } else if ahead_of_writes() {
+             batch.refresh_ahead(runs, |list, i| own.as_ref().is_some_and(|own| own.takes(list, i)));
+         }
++        #[cfg(feature = "diagnostics")]
++        prep.part(16);
+         stage.next("submit: the lists' steps");
+         for list in runs {
+             list.run_deferred(&mut batch, &air, |i| own.as_ref().is_some_and(|own| own.takes(list, i)));
++            #[cfg(feature = "diagnostics")]
++            prep.part(17);
+             firsts.push(lists.len());
+             // (None unless `VICTORY_PRELUDE_UPLOADS=1`.)
+             let uploads = list.prelude_uploads(&mut batch);
++            #[cfg(feature = "diagnostics")]
++            prep.part(18);
+             if let Some(prelude) = list.prelude(&uploads) {
+                 lists.push(Some(prelude));
+             }
++            #[cfg(feature = "diagnostics")]
++            prep.part(19);
+             lists.push(list.list.cast().ok());
++            #[cfg(feature = "diagnostics")]
++            prep.part(20);
+         }
+         batch.fill();
+         stage.next("submit: the last refreshes");
+         batch.flush();
+         crate::watch::ask_once_end();
++        #[cfg(feature = "diagnostics")]
++        prep.part(21);
+         split.part(2);
+         stage.next("submit: snapshots");
+         // The snapshots of the ranges shaders may write, if they were left
+@@ -6468,6 +6716,7 @@ impl HostList {
          self.flush_indirect();
          self.twins_to_depth();
          self.textures_back();
@@ -1346,7 +1451,24 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
          let scratch = self.indirect_args.lock().unwrap_or_else(|e| e.into_inner()).clone();
          if let Some((scratch, _)) = scratch {
              self.indirect_common(&scratch);
-@@ -6681,64 +6904,121 @@ impl HostList {
+@@ -6582,6 +6831,16 @@ impl HostList {
+         *self.deferred() = Deferred::default();
+         self.states.lock().unwrap_or_else(|e| e.into_inner()).clear();
+         self.twins.lock().unwrap_or_else(|e| e.into_inner()).clear();
++        if pool_preludes()
++            && let Some(host) = host()
++            && let Some(prelude) = self.prelude.lock().unwrap_or_else(|e| e.into_inner()).take()
++        {
++            // Reset is reached only after the title list's GPU work completes.
++            let mut spare = host.spare_preludes.lock().unwrap_or_else(|e| e.into_inner());
++            if spare.len() < 32 {
++                spare.push(prelude);
++            }
++        }
+         self.pipelines.lock().unwrap_or_else(|e| e.into_inner()).clear();
+         #[cfg(feature = "diagnostics")]
+         self.indirects.lock().unwrap_or_else(|e| e.into_inner()).clear();
+@@ -6681,64 +6940,121 @@ impl HostList {
              || !self.states.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
      }
  
@@ -1513,7 +1635,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
          }
      }
  
-@@ -7036,7 +7316,8 @@ impl HostList {
+@@ -7036,7 +7352,8 @@ impl HostList {
              copying.insert(key, COPY_DEST);
          }
          barriers.extend(states.iter().filter_map(|(key, (first, last, copy))| {
@@ -1523,7 +1645,24 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
              let real = copying.get(key).copied().unwrap_or(real);
              (real != *first)
                  .then(|| transition(&copy.texture, host_state(real), host_state(*first)))
-@@ -7658,6 +7939,10 @@ impl HostList {
+@@ -7044,11 +7361,11 @@ impl HostList {
+         if barriers.is_empty() && syncs.is_empty() && uploads.is_empty() {
+             return None;
+         }
+-        let Some((allocator, list)) = self
+-            .prelude
+-            .get_or_init(|| host().and_then(|h| h.make_prelude()))
+-            .as_ref()
+-        else {
++        let mut prelude = self.prelude.lock().unwrap_or_else(|e| e.into_inner());
++        if prelude.is_none() {
++            *prelude = host().and_then(Host::make_prelude);
++        }
++        let Some((allocator, list)) = prelude.as_ref() else {
+             fail(format_args!("no host list for a state prelude"));
+         };
+         // SAFETY: the prelude is not executing (every submission is waited
+@@ -7658,6 +7975,10 @@ impl HostList {
          self.deferred().copies.push(Step::Texture(staging));
      }
  
@@ -1534,7 +1673,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
      /// [`HostList::defer_texture`] of a texture whose upload the list's
      /// prelude records if the check finds it due
      /// (`crate::texture::prelude_uploads`; [`HostList::prelude_uploads`]).
-@@ -7833,6 +8118,13 @@ impl HostList {
+@@ -7833,6 +8154,13 @@ impl HostList {
                      }
                      continue;
                  }
@@ -1548,7 +1687,37 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
                  Step::Plane((_, len), fill) => {
                      let started = std::time::Instant::now();
                      fill();
-@@ -8830,7 +9122,11 @@ pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: b
+@@ -7905,8 +8233,10 @@ impl std::hash::Hasher for AddressHash {
+ /// the flights waited for, the heaps' records and what is swept; and, at the
+ /// end, the wait for the heaps' records. In every build: some forty clock
+ /// reads a submission, for the frame line's split of the submitting thread
+-/// ([`submit_split_line`]).
+-static SPLIT: [std::sync::atomic::AtomicU64; 16] = [const { std::sync::atomic::AtomicU64::new(0) }; 16];
++/// ([`submit_split_line`]). Diagnostics also break its list preparation
++/// into: prefix refreshes, deferred steps, upload choices, state preludes,
++/// list gathering and final refreshes (in that order).
++static SPLIT: [std::sync::atomic::AtomicU64; 22] = [const { std::sync::atomic::AtomicU64::new(0) }; 22];
+ 
+ /// Since the last frame-rate line: flushes of refreshes, their refreshes,
+ /// those known to copy nothing, and those done on several threads.
+@@ -7968,7 +8298,15 @@ impl Split {
+ /// to the first number; refreshes and copies are inside the lists' steps),
+ /// and its time after each sending.
+ fn submit_split_line(frames: f64) {
+-    let ms: [f64; 16] = std::array::from_fn(|i| SPLIT[i].swap(0, Ordering::Relaxed) as f64 / 1e6 / frames);
++    let ms: [f64; 22] = std::array::from_fn(|i| SPLIT[i].swap(0, Ordering::Relaxed) as f64 / 1e6 / frames);
++    #[cfg(feature = "diagnostics")]
++    if ms[2] >= 2.0 {
++        tracing::info!(
++            "list preparation per frame: {:.2} ms prefix refreshes, {:.2} deferred steps, {:.2} upload choices, \
++             {:.2} state preludes, {:.2} list gathering, {:.2} final refreshes",
++            ms[16], ms[17], ms[18], ms[19], ms[20], ms[21],
++        );
++    }
+     let f: [f64; 4] = std::array::from_fn(|i| FLUSHES[i].swap(0, Ordering::Relaxed) as f64 / frames);
+     let after = AFTER_SEND.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames;
+     let all: f64 = [0, 1, 2, 3, 4, 5, 11, 12, 13, 14, 15].iter().map(|&i| ms[i]).sum();
+@@ -8830,7 +9168,11 @@ pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: b
      #[cfg(feature = "diagnostics")]
      let sparse = std::time::Instant::now();
      if !title_dst && len >= 64 << 10 {
@@ -1561,7 +1730,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
      } else {
          read_pieces(src, dst, len);
      }
-@@ -8838,13 +9134,16 @@ pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: b
+@@ -8838,13 +9180,16 @@ pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: b
      crate::copystat::add(crate::copystat::C::SparseUs, sparse.elapsed().as_micros() as u64);
  }
  
@@ -1579,7 +1748,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
      while offset < len {
          let at = src.wrapping_add(offset);
          let to = dst.wrapping_add(offset);
-@@ -8863,6 +9162,16 @@ fn read_sparse(src: *const u8, dst: *mut u8, len: usize) {
+@@ -8863,6 +9208,16 @@ fn read_sparse(src: *const u8, dst: *mut u8, len: usize) {
              if n != 0 {
                  plain = n;
              }
@@ -1596,7 +1765,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
          }
          // SAFETY: the query inspects an address and fills a local structure.
          let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
-@@ -8884,6 +9193,7 @@ fn read_sparse(src: *const u8, dst: *mut u8, len: usize) {
+@@ -8884,6 +9239,7 @@ fn read_sparse(src: *const u8, dst: *mut u8, len: usize) {
          }
          offset += n;
      }
@@ -1604,7 +1773,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
  }
  
  fn read_pieces(src: *const u8, dst: *mut u8, len: usize) {
-@@ -9244,7 +9554,59 @@ struct Presenter {
+@@ -9244,7 +9600,59 @@ struct Presenter {
  /// line at the top of the picture (`menu.rs`).
  pub(crate) static METER_FPS_TENTHS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
  
@@ -1664,7 +1833,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
      since: std::time::Instant,
      frames: u32,
      #[cfg(feature = "diagnostics")]
-@@ -9259,6 +9621,7 @@ impl Meter {
+@@ -9259,6 +9667,7 @@ impl Meter {
      fn new() -> Self {
          let now = std::time::Instant::now();
          Meter {
@@ -1672,7 +1841,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
              since: now,
              frames: 0,
              #[cfg(feature = "diagnostics")]
-@@ -9310,6 +9673,7 @@ impl Meter {
+@@ -9310,6 +9719,7 @@ impl Meter {
          let dropped = crate::draw::take_dropped() as f64 / frames;
          let indirect = crate::list::take_indirect() as f64 / frames;
          let left_out = crate::pipeline::take_left_out() as f64 / frames;
@@ -1680,7 +1849,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
          let mesh_largest = MESH_GROUPS[0].swap(0, Ordering::Relaxed);
          let mesh_groups = MESH_GROUPS[1].swap(0, Ordering::Relaxed) as f64 / frames;
          let refused = BUDGET_NOTES[0].swap(0, Ordering::Relaxed) as f64 / frames;
-@@ -9346,6 +9710,10 @@ impl Meter {
+@@ -9346,6 +9756,10 @@ impl Meter {
              }
          }
          {
@@ -1691,7 +1860,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
              let [own, asking, still, all] =
                  [0, 1, 2, 3].map(|i| crate::texture::REFRESH_WAITS[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames);
              if all >= 1.0 {
-@@ -9403,6 +9771,12 @@ impl Meter {
+@@ -9403,6 +9817,12 @@ impl Meter {
          let drops = crate::pipeline::take_drops();
          if self.logged.elapsed() >= std::time::Duration::from_secs(5) {
              self.logged = std::time::Instant::now();
@@ -1704,7 +1873,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
              tracing::info!(
                  "placed texture views: {} writes of another view of the texture a slot showed (it kept the old view until the new was made)",
                  crate::descriptor::host::KEPT_VIEWS.load(Ordering::Relaxed)
-@@ -10026,8 +10400,15 @@ impl Host {
+@@ -10026,8 +10446,15 @@ impl Host {
                  },
              );
              let called = crate::streamline::present_called(&presenting);
@@ -1721,7 +1890,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
              crate::streamline::present_ends(presenting);
              showing.next("the frame meter");
              p.panel.frame(p.meter.line_due());
-@@ -10555,6 +10936,10 @@ pub(crate) fn transition(
+@@ -10555,6 +10982,10 @@ pub(crate) fn transition(
      before: D3D12_RESOURCE_STATES,
      after: D3D12_RESOURCE_STATES,
  ) -> D3D12_RESOURCE_BARRIER {
@@ -1732,7 +1901,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..777d06320a550b94629c6887fd135dde
      D3D12_RESOURCE_BARRIER {
          Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
          Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-@@ -10562,9 +10947,9 @@ pub(crate) fn transition(
+@@ -10562,9 +10993,9 @@ pub(crate) fn transition(
              Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
                  // SAFETY: a borrowed pointer; the barrier never releases it.
                  pResource: unsafe { std::mem::transmute_copy(resource) },
@@ -2701,7 +2870,7 @@ index 93968e1f3fd18f0e4585c061aa6c1143c084a4ef..af45ac88be29ea86f5a4aa96000298db
              crate::capture::dump_targets(frame);
          }
 diff --git a/crates/victory-gpu/src/resource.rs b/crates/victory-gpu/src/resource.rs
-index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..266fd17051b371ea9068ba49331d129861335a47 100644
+index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..a9559bb018e60dff0c33dcd3cb6c1f2bfb6387ed 100644
 --- a/crates/victory-gpu/src/resource.rs
 +++ b/crates/victory-gpu/src/resource.rs
 @@ -1260,6 +1260,8 @@ pub(crate) struct HostTexture {
@@ -2936,7 +3105,7 @@ index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..266fd17051b371ea9068ba49331d1298
          && d.sample_count <= 1
          && clear_value.is_none()
          && texture_layout(desc).is_some_and(|t| !t.planes[0].layout.desc.swizzle.xor())
-@@ -3599,6 +3734,267 @@ mod tests {
+@@ -3599,6 +3734,290 @@ mod tests {
          }
      }
  
@@ -3012,7 +3181,7 @@ index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..266fd17051b371ea9068ba49331d1298
 +            );
 +            device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
 +        };
-+        let (upload, mapped) = gpu.upload_buffer(bytes).expect("fixture upload");
++        let (upload, _) = gpu.upload_buffer(bytes).expect("fixture upload");
 +        let readback = gpu.read_back_buffer(bytes).expect("fixture readback");
 +        let cpu_handle = |index: u32| D3D12_CPU_DESCRIPTOR_HANDLE {
 +            // SAFETY: the heap is live and the fixture keeps index below four.
@@ -3030,15 +3199,8 @@ index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..266fd17051b371ea9068ba49331d1298
 +            Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
 +            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { PlacedFootprint: footprints[mip] },
 +        };
-+        // SAFETY: all copied rows are within the upload footprint.
-+        unsafe {
-+            let first = footprints[0];
-+            for y in 0..4 {
-+                let row = mapped.add(first.Offset as usize + y * first.Footprint.RowPitch as usize).cast::<u32>();
-+                for x in 0..4 { row.add(x).write((4 * y + x + 1) as u32); }
-+            }
-+            upload.Unmap(0, None);
-+        }
++        // SAFETY: upload_buffer returned a mapped buffer.
++        unsafe { upload.Unmap(0, None) };
 +        let dispatch = |list: &HostList, src: u32, size: u32| {
 +            let dst = src + 1;
 +            let table = 2 * src;
@@ -3076,7 +3238,24 @@ index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..266fd17051b371ea9068ba49331d1298
 +            }
 +        };
 +
++        use std::sync::atomic::Ordering::Relaxed;
++        let reused_before = crate::host::PRELUDES_REUSED.load(Relaxed);
 +        for separate in [false, true] {
++            // Different inputs prevent stale GPU data passing the reused-list case.
++            let seed = if separate { 10 } else { 0 };
++            // SAFETY: the previous execution completed and all rows fit the upload.
++            unsafe {
++                let mut data = std::ptr::null_mut();
++                upload.Map(0, None, Some(&mut data)).unwrap();
++                let f = footprints[0];
++                for y in 0..4 {
++                    let row = data.cast::<u8>().add(f.Offset as usize + y * f.Footprint.RowPitch as usize).cast::<u32>();
++                    for x in 0..4 {
++                        row.add(x).write((4 * y + x + 1) as u32 + seed);
++                    }
++                }
++                upload.Unmap(0, None);
++            }
 +            let first = gpu.new_list().unwrap();
 +            first.ensure_texture(title.0, COPY_DEST);
 +            // SAFETY: the upload contains mip zero's footprint.
@@ -3103,7 +3282,10 @@ index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..266fd17051b371ea9068ba49331d1298
 +            gpu.execute(&lists);
 +
 +            let mut mapped = std::ptr::null_mut();
-+            let expected: [&[u32]; 3] = [&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], &[8, 14, 32, 38], &[29]];
++            let input: [u32; 16] = std::array::from_fn(|i| i as u32 + 1 + seed);
++            let middle = [8, 14, 32, 38].map(|value| value + 3 * seed);
++            let last = [29 + 9 * seed];
++            let expected: [&[u32]; 3] = [&input, &middle, &last];
 +            // SAFETY: execute waited for the copies; each read is within its footprint.
 +            unsafe {
 +                device.GetDeviceRemovedReason().unwrap();
@@ -3119,6 +3301,16 @@ index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..266fd17051b371ea9068ba49331d1298
 +                }
 +                readback.Unmap(0, None);
 +            }
++            first.reset();
++            if let Some(second) = &second {
++                second.reset();
++            }
++            collect.reset();
++        }
++        if crate::asked_for!("VICTORY_PRELUDE_POOL") {
++            let reused = crate::host::PRELUDES_REUSED.load(Relaxed) - reused_before;
++            assert!(reused >= 2, "preludes from the first pass must feed the second");
++            eprintln!("Reused {reused} completed state preludes");
 +        }
 +    }
 +
@@ -3204,7 +3396,7 @@ index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..266fd17051b371ea9068ba49331d1298
      fn heap(size: u64) -> This {
          let desc = HeapDesc {
              size,
-@@ -4061,6 +4457,310 @@ mod tests {
+@@ -4061,6 +4480,310 @@ mod tests {
          }
      }
  

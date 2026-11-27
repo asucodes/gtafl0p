@@ -99,7 +99,7 @@ $experiment = @{
 .\scripts\play-4050.ps1 -Exe 'C:\Path\To\Your\Title.exe' -FrameCsv '.\presents.csv' -More $experiment
 ~~~
 
-Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `856a47b2bd6f53489e10397b5e64795ef3c28661`.
+Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `c968dbe0774ad355ab0c9fe92eb2caf881c4ece1`.
 
 ## Shader output and pipeline failures
 
@@ -185,6 +185,12 @@ The last heavy window measured 98.2 ms median and 142.1 ms p95 over 79 presents,
 The RTX 4050 passed a known-value compute test that runs two dependent dispatches over three mips and checks all 21 texels. It passed with both dispatches in one command list and with a command-list boundary between them. Set `VICTORY_INPUT_SCRIPT_ONLY=1` in a diagnostics run to suppress live keyboard and controller input while leaving the existing scripted input available.
 
 Two isolated runs used the same executable and copied save. The late prison-window view had comparable draw counts. With independent mip states off, 117 heavy presents measured 89.55 ms median and 112.55 ms p95. With it on, 116 presents measured 91.78 ms median and 124.79 ms p95. Neither sample contained a frame at or below 33.33 ms. The one pair is insufficient to attribute the timing difference. Exposure and purple surfaces still appeared in the enabled run, so the option remains experimental.
+
+### Startup state-prelude reuse
+
+Diagnostics now split list preparation into prefix refreshes, deferred steps, upload choices, state preludes, list gathering and final refreshes. A short RTX 4050 startup capture showed one interval at 778.34 ms per frame in state preludes and 283 preludes created by the last sample. The window closed before the steady scene.
+
+Set `VICTORY_PRELUDE_POOL=1` with lazy preludes to try the bounded pool of completed allocators and command lists. The RTX 4050 known-value test passed with pooling off and on. With it on, two retired pairs were reused and both distinct texel patterns matched. This verifies the reuse path and leaves gameplay performance to be measured.
 
 ## Current VIctory-NVIDIA comparison
 
