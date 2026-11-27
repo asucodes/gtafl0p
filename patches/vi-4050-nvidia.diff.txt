@@ -2701,7 +2701,7 @@ index 93968e1f3fd18f0e4585c061aa6c1143c084a4ef..af45ac88be29ea86f5a4aa96000298db
              crate::capture::dump_targets(frame);
          }
 diff --git a/crates/victory-gpu/src/resource.rs b/crates/victory-gpu/src/resource.rs
-index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..e5fd318b66a820c42464fceccf8ab2e158757377 100644
+index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..266fd17051b371ea9068ba49331d129861335a47 100644
 --- a/crates/victory-gpu/src/resource.rs
 +++ b/crates/victory-gpu/src/resource.rs
 @@ -1260,6 +1260,8 @@ pub(crate) struct HostTexture {
@@ -2936,10 +2936,192 @@ index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..e5fd318b66a820c42464fceccf8ab2e1
          && d.sample_count <= 1
          && clear_value.is_none()
          && texture_layout(desc).is_some_and(|t| !t.planes[0].layout.desc.swizzle.xor())
-@@ -3599,6 +3734,85 @@ mod tests {
+@@ -3599,6 +3734,267 @@ mod tests {
          }
      }
  
++    #[cfg(windows)]
++    #[test]
++    #[ignore = "requires a D3D12 GPU and VICTORY_TEXTURE_MIP_STATES=1"]
++    fn compute_mip_chain_preserves_texels_within_and_across_lists() {
++        use crate::descriptor::View;
++        use crate::host::{HostList, compile, host};
++        use windows::Win32::Graphics::Direct3D12::*;
++        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R32_UINT;
++        use windows::core::s;
++
++        const COPY_DEST: u32 = 0x400;
++        const COPY_SOURCE: u32 = 0x800;
++        const SHADER_RESOURCE: u32 = 0x40 | 0x80;
++        const UAV: u32 = 8;
++        const SOURCE: &str = r#"
++Texture2D<uint> src : register(t0);
++RWTexture2D<uint> dst : register(u0);
++[RootSignature("DescriptorTable(SRV(t0), UAV(u0))")]
++[numthreads(1, 1, 1)]
++void downsample(uint3 id : SV_DispatchThreadID) {
++    dst[id.xy] = src.Load(int3(2 * id.xy, 0)) * 3 + 5;
++}
++"#;
++
++        struct TitleTexture(This);
++        impl Drop for TitleTexture {
++            fn drop(&mut self) { crate::object::release(self.0); }
++        }
++
++        let gpu = host().expect("D3D12 device");
++        let format = DXGI_FORMAT_R32_UINT;
++        let desc = ResourceDesc { flags: 4, ..texture(4, 4, format.0 as u32, 3) };
++        let mut title = std::ptr::null();
++        assert_eq!(
++            create_committed(
++                std::ptr::null(), &PROPERTIES, 0, &desc, 0, std::ptr::null(),
++                &RESOURCE_IIDS[0], &mut title,
++            ),
++            S_OK
++        );
++        let title = TitleTexture(title);
++        let copy = host_copy(title.0).expect("host texture");
++        assert_eq!(copy.state_mips, 3, "test requires VICTORY_TEXTURE_MIP_STATES=1");
++
++        let code = compile(SOURCE, s!("downsample"), s!("cs_5_1")).expect("test shader");
++        let device = &gpu.device;
++        // SAFETY: the compiled shader contains its root signature.
++        let (root, pso, views): (ID3D12RootSignature, ID3D12PipelineState, ID3D12DescriptorHeap) = unsafe {
++            let root: Option<ID3D12RootSignature> = Some(device.CreateRootSignature(0, &code).unwrap());
++            let pso = device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
++                pRootSignature: std::mem::transmute_copy(&root),
++                CS: D3D12_SHADER_BYTECODE { pShaderBytecode: code.as_ptr().cast(), BytecodeLength: code.len() },
++                ..Default::default()
++            }).unwrap();
++            let views = device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
++                Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
++                NumDescriptors: 4,
++                Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
++                ..Default::default()
++            }).unwrap();
++            (root.unwrap(), pso, views)
++        };
++
++        let mut footprints = [D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default(); 3];
++        let mut bytes = 0;
++        // SAFETY: a live texture and three footprint outputs.
++        let stride = unsafe {
++            device.GetCopyableFootprints(
++                &copy.texture.GetDesc(), 0, 3, 0, Some(footprints.as_mut_ptr()), None, None, Some(&mut bytes),
++            );
++            device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
++        };
++        let (upload, mapped) = gpu.upload_buffer(bytes).expect("fixture upload");
++        let readback = gpu.read_back_buffer(bytes).expect("fixture readback");
++        let cpu_handle = |index: u32| D3D12_CPU_DESCRIPTOR_HANDLE {
++            // SAFETY: the heap is live and the fixture keeps index below four.
++            ptr: unsafe { views.GetCPUDescriptorHandleForHeapStart() }.ptr + (index * stride) as usize,
++        };
++        let texture_location = |mip| D3D12_TEXTURE_COPY_LOCATION {
++            // SAFETY: the list and this fixture hold the resource.
++            pResource: unsafe { std::mem::transmute_copy(&copy.texture) },
++            Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
++            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: mip },
++        };
++        let buffer_location = |buffer: &ID3D12Resource, mip| D3D12_TEXTURE_COPY_LOCATION {
++            // SAFETY: the fixture holds the buffer until submission completes.
++            pResource: unsafe { std::mem::transmute_copy(buffer) },
++            Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
++            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { PlacedFootprint: footprints[mip] },
++        };
++        // SAFETY: all copied rows are within the upload footprint.
++        unsafe {
++            let first = footprints[0];
++            for y in 0..4 {
++                let row = mapped.add(first.Offset as usize + y * first.Footprint.RowPitch as usize).cast::<u32>();
++                for x in 0..4 { row.add(x).write((4 * y + x + 1) as u32); }
++            }
++            upload.Unmap(0, None);
++        }
++        let dispatch = |list: &HostList, src: u32, size: u32| {
++            let dst = src + 1;
++            let table = 2 * src;
++            let srv = D3D12_SHADER_RESOURCE_VIEW_DESC {
++                Format: format,
++                ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
++                Shader4ComponentMapping: 5768,
++                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
++                    Texture2D: D3D12_TEX2D_SRV { MostDetailedMip: src, MipLevels: 1, ..Default::default() },
++                },
++            };
++            let uav = D3D12_UNORDERED_ACCESS_VIEW_DESC {
++                Format: format,
++                ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
++                Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
++                    Texture2D: D3D12_TEX2D_UAV { MipSlice: dst, PlaneSlice: 0 },
++                },
++            };
++            // Use the title-format words that the production view decoder consumes.
++            let read = View::Shader(title.0 as usize, Some([format.0 as u32, 4, 5768, 0, src, 1, 0, 0, 0, 0]));
++            let write = View::Unordered(title.0 as usize, 0, Some([format.0 as u32, 4, dst, 0, 0, 0, 0, 0, 0, 0]));
++            list.ensure_texture_view(title.0, &read, SHADER_RESOURCE);
++            list.ensure_texture_view(title.0, &write, UAV);
++            // SAFETY: two adjacent views describe disjoint mip levels; all objects remain live.
++            unsafe {
++                device.CreateShaderResourceView(&copy.texture, Some(&srv), cpu_handle(table));
++                device.CreateUnorderedAccessView(&copy.texture, None::<&ID3D12Resource>, Some(&uav), cpu_handle(table + 1));
++                let mut handle = views.GetGPUDescriptorHandleForHeapStart();
++                handle.ptr += u64::from(table * stride);
++                list.list.SetDescriptorHeaps(&[Some(views.clone())]);
++                list.list.SetComputeRootSignature(&root);
++                list.list.SetPipelineState(&pso);
++                list.list.SetComputeRootDescriptorTable(0, handle);
++                list.list.Dispatch(size, size, 1);
++            }
++        };
++
++        for separate in [false, true] {
++            let first = gpu.new_list().unwrap();
++            first.ensure_texture(title.0, COPY_DEST);
++            // SAFETY: the upload contains mip zero's footprint.
++            unsafe {
++                first.list.CopyTextureRegion(&texture_location(0), 0, 0, 0, &buffer_location(&upload, 0), None);
++            }
++            dispatch(&first, 0, 2);
++            let second = separate.then(|| gpu.new_list().unwrap());
++            dispatch(second.as_ref().unwrap_or(&first), 1, 1);
++            let collect = gpu.new_list().unwrap();
++            collect.ensure_texture(title.0, COPY_SOURCE);
++            // SAFETY: both sides match the footprint of each GPU mip.
++            unsafe {
++                for mip in 0..3 {
++                    collect.list.CopyTextureRegion(
++                        &buffer_location(&readback, mip as usize), 0, 0, 0, &texture_location(mip), None,
++                    );
++                }
++            }
++            first.close();
++            if let Some(second) = &second { second.close(); }
++            collect.close();
++            let lists: Vec<_> = [&first].into_iter().chain(second.iter()).chain([&collect]).collect();
++            gpu.execute(&lists);
++
++            let mut mapped = std::ptr::null_mut();
++            let expected: [&[u32]; 3] = [&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], &[8, 14, 32, 38], &[29]];
++            // SAFETY: execute waited for the copies; each read is within its footprint.
++            unsafe {
++                device.GetDeviceRemovedReason().unwrap();
++                readback.Map(0, None, Some(&mut mapped)).unwrap();
++                for (mip, expected) in expected.iter().enumerate() {
++                    let f = footprints[mip];
++                    let start = mapped.cast::<u8>().add(f.Offset as usize);
++                    let width = f.Footprint.Width as usize;
++                    for (y, expected) in expected.chunks_exact(width).enumerate() {
++                        let row = start.add(y * f.Footprint.RowPitch as usize).cast::<u32>();
++                        assert_eq!(std::slice::from_raw_parts(row, width), expected, "mip {mip}, row {y}, separate lists {separate}");
++                    }
++                }
++                readback.Unmap(0, None);
++            }
++        }
++    }
++
 +    #[cfg(windows)]
 +    #[test]
 +    #[ignore = "requires a tier 2 D3D12 GPU and VICTORY_LEVELS_ON_DEMAND=1"]
@@ -3022,7 +3204,7 @@ index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..e5fd318b66a820c42464fceccf8ab2e1
      fn heap(size: u64) -> This {
          let desc = HeapDesc {
              size,
-@@ -4061,6 +4275,310 @@ mod tests {
+@@ -4061,6 +4457,310 @@ mod tests {
          }
      }
  
@@ -4412,6 +4594,59 @@ index 0000000000000000000000000000000000000000..3d3131e8e145fac7cbbe7df55656ec5f
 +        );
 +    }
 +}
+diff --git a/crates/victory-hle/src/modules/gameinput.rs b/crates/victory-hle/src/modules/gameinput.rs
+index 0e24b17f61fd21c773d4e51c9f021da0c4950fa2..494c9bf4eedaf3caaec8fb3b63804801ef1049ef 100644
+--- a/crates/victory-hle/src/modules/gameinput.rs
++++ b/crates/victory-hle/src/modules/gameinput.rs
+@@ -1137,6 +1137,20 @@ mod host {
+ 
+     use super::*;
+ 
++    /// Isolated diagnostic playback still feeds scripted keys to the
++    /// fallback controller.
++    fn script_only() -> bool {
++        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++        *ON.get_or_init(|| {
++            let on = cfg!(feature = "diagnostics")
++                && std::env::var_os("VICTORY_INPUT_SCRIPT_ONLY").is_some_and(|value| value == "1");
++            if on {
++                tracing::info!("benchmark input uses scripted keys only");
++            }
++            on
++        })
++    }
++
+     /// Asking XInput about an empty slot is slow; look again this often.
+     const EMPTY_SLOT_RECHECK: Duration = Duration::from_secs(1);
+ 
+@@ -1181,7 +1195,7 @@ mod host {
+ 
+     impl Source for Host {
+         fn pad(&mut self, slot: usize) -> Option<PadState> {
+-            if self.empty_until[slot].is_some_and(|until| Instant::now() < until) {
++            if script_only() || self.empty_until[slot].is_some_and(|until| Instant::now() < until) {
+                 return None;
+             }
+             let mut state = XINPUT_STATE::default();
+@@ -1213,7 +1227,7 @@ mod host {
+                 return Vec::new();
+             }
+             let mut down = scripted();
+-            if focused() {
++            if !script_only() && focused() {
+                 // Left/right modifier keys only, as devices report them; no
+                 // mouse buttons (below 0x08).
+                 let held: Vec<u8> = (0x08..=0xFE_u8)
+@@ -1236,6 +1250,9 @@ mod host {
+         }
+ 
+         fn rumble(&mut self, slot: usize, low: u16, high: u16) {
++            if script_only() {
++                return;
++            }
+             let speeds = XINPUT_VIBRATION {
+                 wLeftMotorSpeed: low,
+                 wRightMotorSpeed: high,
 diff --git a/crates/victory-hle/src/modules/lifecycle.rs b/crates/victory-hle/src/modules/lifecycle.rs
 index 09c6baa69c86654b0536f6adebfbd14ecd705e1a..8c8a5d288385d593f7a7313c24bb8e1e5a282af8 100644
 --- a/crates/victory-hle/src/modules/lifecycle.rs

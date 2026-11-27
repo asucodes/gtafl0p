@@ -99,7 +99,7 @@ $experiment = @{
 .\scripts\play-4050.ps1 -Exe 'C:\Path\To\Your\Title.exe' -FrameCsv '.\presents.csv' -More $experiment
 ~~~
 
-Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `bcb6ad988639dce5881d385a66c3c296c839d48f`.
+Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `856a47b2bd6f53489e10397b5e64795ef3c28661`.
 
 ## Shader output and pipeline failures
 
@@ -179,6 +179,12 @@ The operation trace now records the title's texture view, the host allocation ge
 Set `VICTORY_TEXTURE_MIP_STATES=1` in the launcher's `-More` settings to test the opt-in implementation. Eligible 2D textures keep independent mip states inside a command list, then return to a uniform state at handoff for existing upload and readback paths. Two state-transition tests passed. Three RTX 4050 prologue captures recorded 265 host mip transitions, including 3 depth-pyramid, 3 lightmap and 6 mip-generation dispatches with the expected transitions. The run closed normally.
 
 The last heavy window measured 98.2 ms median and 142.1 ms p95 over 79 presents, compared with 123.0 ms and 638.9 ms over 71 presents in the preceding baseline. The first window was slower at 907.1 ms median and 3,643.6 ms p95, compared with 257.0 ms and 670.3 ms. The camera and streaming timelines differed. This run confirms the new barrier path and leaves both image quality and sustained performance unverified.
+
+### GPU mip readback and isolated comparison
+
+The RTX 4050 passed a known-value compute test that runs two dependent dispatches over three mips and checks all 21 texels. It passed with both dispatches in one command list and with a command-list boundary between them. Set `VICTORY_INPUT_SCRIPT_ONLY=1` in a diagnostics run to suppress live keyboard and controller input while leaving the existing scripted input available.
+
+Two isolated runs used the same executable and copied save. The late prison-window view had comparable draw counts. With independent mip states off, 117 heavy presents measured 89.55 ms median and 112.55 ms p95. With it on, 116 presents measured 91.78 ms median and 124.79 ms p95. Neither sample contained a frame at or below 33.33 ms. The one pair is insufficient to attribute the timing difference. Exposure and purple surfaces still appeared in the enabled run, so the option remains experimental.
 
 ## Current VIctory-NVIDIA comparison
 
