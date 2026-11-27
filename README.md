@@ -99,7 +99,7 @@ $experiment = @{
 .\scripts\play-4050.ps1 -Exe 'C:\Path\To\Your\Title.exe' -FrameCsv '.\presents.csv' -More $experiment
 ~~~
 
-Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `d646840eaf05c61df340b3e84d1ad1b0f73fe5d7`.
+Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `60c961ab5463055f180f6e244480f3a965569c88`.
 
 ## Shader output and pipeline failures
 
@@ -151,6 +151,10 @@ In two later phases, the title-side median was 215.0 ms with the worker off and 
 ### Diagnose a material or lighting defect
 
 The diagnostics build can capture just the chosen frames. Set `VICTORY_CAPTURE_WORLD=1` and `VICTORY_CAPTURE_OFFSETS=80,160,240` with a fresh local `VICTORY_CAPTURE` folder. The offsets are counted from the first frame with at least 500 draws. Use `VICTORY_DUMP_TARGETS=1` for end-of-frame render targets and keep the corresponding operation logs. Set `VICTORY_CAPTURE_BAKE_TARGETS=1` to read back up to 12 bake targets in each of the first two bake frames. The log identifies the resources and the pipeline that registered them. Readback synchronizes GPU work, so use a separate run for performance measurements. Verified on the RTX 4050 Laptop with two sets of bake attachments and three selected prologue frames. These captures did not reproduce the exact reported face shot.
+
+### Texture upload and descriptor generations
+
+The upload paths keep the descriptor generation they selected. A deferred completion can expose that view only while the title slot still names that generation. The immediate path keeps its existing GPU fence and descriptor-retirement handling. This prevents an old upload from making a replacement texture appear ready. On the RTX 4050, three targeted tests passed, including a regression that rewrites the slot between selection and completion registration. The tests verify the resource handoff. Scene appearance and frame rate require a separate run.
 
 ## Current VIctory-NVIDIA comparison
 

@@ -240,7 +240,7 @@ index 140a0cfe3985743c6612e4c95db5b66509d50517..cf0d5e2a9772ff3ff9dd747986271ddc
  }
  
 diff --git a/crates/victory-gpu/src/descriptor/host.rs b/crates/victory-gpu/src/descriptor/host.rs
-index 9045bb047066ccc30702080c16096a97dd0567ab..3661f333b62174ecd2b60279efa52f58fccbeb52 100644
+index 9045bb047066ccc30702080c16096a97dd0567ab..6d9e49bae0cd30278c97621a8c45d6f74f10e294 100644
 --- a/crates/victory-gpu/src/descriptor/host.rs
 +++ b/crates/victory-gpu/src/descriptor/host.rs
 @@ -111,7 +111,13 @@ impl Made {
@@ -265,7 +265,123 @@ index 9045bb047066ccc30702080c16096a97dd0567ab..3661f333b62174ecd2b60279efa52f58
              buffer_sweep: Mutex::default(),
              buffer_frame: std::sync::atomic::AtomicU64::new(u64::MAX),
              heap,
-@@ -3320,11 +3327,19 @@ impl HostHeap {
+@@ -2687,40 +2694,37 @@ impl HostHeap {
+         matches!((view(shown), view(key)), (Some(a), Some(b)) if same_placed_texture(&a, &b))
+     }
+ 
+-    /// Slot `index` is made from the record at `handle` (what it is now)
+-    /// when `list`, which holds the upload of what that view shows, has run:
+-    /// until then it shows what it showed. (Made at once, the frames on the
+-    /// card read the new view before its levels were filled.)
+-    pub(crate) fn texture_slot_flip(&self, list: &crate::host::HostList, index: u32, handle: u64) {
+-        self.flip(list, index, handle, None);
++    /// Publishes the captured view when the list that uploads it has run.
++    /// The previous view stays visible until then.
++    pub(crate) fn texture_slot_flip(&self, list: &crate::host::HostList, index: u32, handle: u64, key: u64) {
++        self.flip(list, index, handle, key, None);
+     }
+ 
+-    /// The same of a slot that shows nothing of the texture the record at
+-    /// `handle` views, or something else: until then it shows the neutral
+-    /// texture ([`show_after`]).
+-    pub(crate) fn texture_slot_show_after(&self, list: &crate::host::HostList, index: u32, handle: u64) {
+-        if self.show_later(index, handle) {
+-            self.flip(list, index, handle, Some(crate::frame::current()));
++    /// Publishes the captured view after the upload, using a neutral view
++    /// while it is pending if the former view cannot stand in for it.
++    pub(crate) fn texture_slot_show_after(&self, list: &crate::host::HostList, index: u32, handle: u64, key: u64) {
++        if self.show_later(index, handle, key) {
++            self.flip(list, index, handle, key, Some(crate::frame::current()));
+         }
+     }
+ 
+-    /// What slot `index` shows until the texture the record at `handle` views
+-    /// is shown. False: it shows it, or there is none.
+-    fn show_later(&self, index: u32, handle: u64) -> bool {
++    /// Prepares the slot for the exact view whose upload is pending.
++    fn show_later(&self, index: u32, handle: u64, key: u64) -> bool {
+         use std::sync::atomic::Ordering::Relaxed;
+-        let key = record_key(handle);
+-        let view = view_at(key as u32, (key >> 32) as u32);
+-        let (true, Some(view)) = (key != 0, view) else {
++        if index >= self.count || key == 0 {
+             return false;
+-        };
++        }
+         let stale = {
+             let _made = self.made.lock(index);
+             let Some(shown) = self.made.get(index) else {
+                 return false;
+             };
+-            if shown == key {
++            if shown == key || !self.slot_still_at(handle, key) {
+                 return false;
+             }
++            let Some(view) = view_at(key as u32, (key >> 32) as u32) else {
++                return false;
++            };
+             // (As `mirror`.)
+             let stale = self.note_buffer(index, Some(&view), true);
+             let old = view_at(shown as u32, (shown >> 32) as u32);
+@@ -2747,11 +2751,11 @@ impl HostHeap {
+ 
+     /// [`HostHeap::texture_slot_show_after`] of a texture whose upload `job`
+     /// makes: shown when that has run.
+-    pub(crate) fn texture_slot_show_ahead(&self, job: &crate::texture::ahead::Job, index: u32, handle: u64) {
+-        if !self.show_later(index, handle) {
++    pub(crate) fn texture_slot_show_ahead(&self, job: &crate::texture::ahead::Job, index: u32, handle: u64, key: u64) {
++        if !self.show_later(index, handle, key) {
+             return;
+         }
+-        let (heap, key) = (std::ptr::from_ref(self) as usize, record_key(handle));
++        let heap = std::ptr::from_ref(self) as usize;
+         let late = Some(crate::frame::current());
+         job.then(move || {
+             let flip = Flip { after: 0, heap, index, handle, key, late };
+@@ -2767,20 +2771,23 @@ impl HostHeap {
+             && !crate::texture::BAKING.get()
+             && index < self.count
+             && !self.texture_slot_made_from(index, handle)
+-            && let Some(view) = super::view(handle)
++            && let Some((view, key)) = self.texture_slot_snapshot(index, handle)
+             && let Some(View::Shader(resource, _)) = placed_texture(&view).or(Some(view))
+             && crate::resource::buffer_bytes(resource as crate::object::This).is_none()
+             && crate::resource::host_resource(resource as crate::object::This).is_some_and(crate::pool::fresh)
+             && !crate::texture::ahead::there(resource as crate::object::This)
+         {
+-            return self.texture_slot_show_after(list, index, handle);
++            return self.texture_slot_show_after(list, index, handle, key);
+         }
+         self.mirror(index, handle, true);
+     }
+ 
+-    fn flip(&self, list: &crate::host::HostList, index: u32, handle: u64, late: Option<u64>) {
++    fn flip(&self, list: &crate::host::HostList, index: u32, handle: u64, key: u64, late: Option<u64>) {
+         use std::sync::atomic::Ordering::{Relaxed, Release};
+-        let (heap, key) = (std::ptr::from_ref(self) as usize, record_key(handle));
++        if index >= self.count || !self.slot_still_at(handle, key) {
++            return;
++        }
++        let heap = std::ptr::from_ref(self) as usize;
+         let id = NEXT_PENDING_FLIP.fetch_add(1, Relaxed);
+         let origin = (std::ptr::from_ref(list) as usize, list.epoch());
+         {
+@@ -2869,11 +2876,9 @@ impl HostHeap {
+         key != 0 && record_key(handle) == key
+     }
+ 
+-    /// Looks up `(view, key)` for slot `index` prior to a synchronous bake
+-    /// upload without replacing its current host descriptor with `neutral()`;
+-    /// [`HostHeap::publish_uploaded_slot`] exposes the real descriptor and
+-    /// updates `Spans`/stride tracking once the GPU copy finishes.
+-    pub(crate) fn prepare_bake_slot(&self, index: u32, handle: u64) -> Option<(View, u64)> {
++    /// Captures the title view and its generation together, before an upload
++    /// starts. Pass the same key when publishing or deferring the host view.
++    pub(crate) fn texture_slot_snapshot(&self, index: u32, handle: u64) -> Option<(View, u64)> {
+         if index >= self.count {
+             return None;
+         }
+@@ -3320,11 +3325,19 @@ impl HostHeap {
          }
      }
  
@@ -287,7 +403,44 @@ index 9045bb047066ccc30702080c16096a97dd0567ab..3661f333b62174ecd2b60279efa52f58
          let Some(at) = first.checked_sub(self.count) else {
              return;
          };
-@@ -4836,6 +4851,9 @@ fn make_twinned(
+@@ -3764,6 +3777,16 @@ impl HostHeap {
+     /// views are made only for draws (`for_draw`), which also copy their
+     /// data: a host copy of a buffer is made on first use.
+     pub(crate) fn mirror(&self, index: u32, handle: u64, for_draw: bool) -> Option<View> {
++        self.mirror_view(index, handle, for_draw, None)
++    }
++
++    /// Mirrors a view already checked for readiness, keeping the usual
++    /// fence and descriptor-retirement handling for that generation.
++    pub(crate) fn mirror_ready(&self, index: u32, handle: u64, key: u64) -> Option<View> {
++        self.mirror_view(index, handle, true, Some(key))
++    }
++
++    fn mirror_view(&self, index: u32, handle: u64, for_draw: bool, expected: Option<u64>) -> Option<View> {
+         if index >= self.count {
+             // Diagnostic (NVIDIA heap cap): the highest title slot past the
+             // host heap seen so far.
+@@ -3782,6 +3805,9 @@ impl HostHeap {
+         let [tag, i, generation] = unsafe { (handle as *const [u32; 3]).read_unaligned() };
+         // Generations start at 1, so a made slot's key is never 0.
+         let key = u64::from(generation) << 32 | u64::from(i);
++        if expected.is_some_and(|expected| tag != VIEW_TAG || expected != key) {
++            return None;
++        }
+         // Made from this record, and nothing has changed it: most of the
+         // asks, from five recording threads, behind one lock while another
+         // held it to make a descriptor (15 % of a recording thread's time in
+@@ -3794,6 +3820,9 @@ impl HostHeap {
+             return Some(view);
+         }
+         let held = self.made.lock(index);
++        if expected.is_some_and(|expected| !self.slot_still_at(handle, expected)) {
++            return None;
++        }
+         let shown = self.made.get(index).unwrap_or(0);
+         let view = (tag == VIEW_TAG).then(|| view_at(i, generation)).flatten();
+         let Some(view) = view else {
+@@ -4836,6 +4865,9 @@ fn make_twinned(
                      && let Some(desc) = &mut desc
                  {
                      from_base(desc, copy.base);
@@ -297,7 +450,7 @@ index 9045bb047066ccc30702080c16096a97dd0567ab..3661f333b62174ecd2b60279efa52f58
                  }
                  // SAFETY: a live texture and a slot of our heap.
                  unsafe {
-@@ -4991,6 +5009,39 @@ fn from_base(desc: &mut D3D12_SHADER_RESOURCE_VIEW_DESC, base: u32) {
+@@ -4991,6 +5023,39 @@ fn from_base(desc: &mut D3D12_SHADER_RESOURCE_VIEW_DESC, base: u32) {
      t.ResourceMinLODClamp = (t.ResourceMinLODClamp - base as f32).max(0.0);
  }
  
@@ -337,7 +490,7 @@ index 9045bb047066ccc30702080c16096a97dd0567ab..3661f333b62174ecd2b60279efa52f58
  /// Writes of a slot with another view of the placed texture it showed,
  /// since the start: the slot kept showing the old view.
  pub(crate) static KEPT_VIEWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-@@ -5494,6 +5545,19 @@ fn null_view(at: D3D12_CPU_DESCRIPTOR_HANDLE) {
+@@ -5494,6 +5559,19 @@ fn null_view(at: D3D12_CPU_DESCRIPTOR_HANDLE) {
  mod tests {
      use super::*;
  
@@ -357,7 +510,7 @@ index 9045bb047066ccc30702080c16096a97dd0567ab..3661f333b62174ecd2b60279efa52f58
      /// A view of a host copy that begins at a later level shows the same
      /// levels of it.
      #[test]
-@@ -6526,11 +6590,29 @@ mod tests {
+@@ -6526,11 +6604,29 @@ mod tests {
          assert_eq!((a, b), (4, 4 + heap.dynamic - 100));
          // 40 left at the end: 50 do not fit until something is given back.
          assert_eq!(heap.dynamic(50), None);
@@ -388,7 +541,7 @@ index 9045bb047066ccc30702080c16096a97dd0567ab..3661f333b62174ecd2b60279efa52f58
      #[test]
      fn dynamic_search_can_find_a_run_across_the_cursor() {
          let Some(heap) = HostHeap::new(false, 4) else {
-@@ -6544,17 +6626,17 @@ mod tests {
+@@ -6544,17 +6640,17 @@ mod tests {
          assert_eq!((first, left, right, rest), (4, 5, 7, 9));
  
          // Reallocating the left half puts the cursor back in the middle.
@@ -411,8 +564,41 @@ index 9045bb047066ccc30702080c16096a97dd0567ab..3661f333b62174ecd2b60279efa52f58
          assert_eq!(heap.dynamic(2), None);
      }
  
+@@ -6726,6 +6822,32 @@ pub(crate) fn list_views() -> bool {
+ mod bake_flip_tests {
+     use super::*;
+ 
++    #[test]
++    fn pending_upload_cannot_register_a_rewritten_descriptor() {
++        let gpu = host().expect("a D3D12 adapter");
++        let heap = HostHeap::new(false, 4).expect("a host view heap");
++        let list = gpu.new_list().expect("an upload list");
++        let mut slot = [0_u32; 8];
++        let handle = slot.as_mut_ptr() as u64;
++
++        crate::descriptor::record(handle, View::Constant(0x1000, 256));
++        let (_, old) = heap.texture_slot_snapshot(0, handle).unwrap();
++        crate::descriptor::record(handle, View::Constant(0x2000, 256));
++        let (_, current) = heap.texture_slot_snapshot(0, handle).unwrap();
++        assert_ne!(old, current);
++
++        heap.texture_slot_flip(&list, 0, handle, old);
++        heap.texture_slot_show_after(&list, 0, handle, old);
++        assert!(!heap.publish_uploaded_slot(0, handle, old));
++        assert!(heap.mirror_ready(0, handle, old).is_none());
++        assert!(heap.take_pending_list_flips().is_empty());
++
++        heap.texture_slot_flip(&list, 0, handle, current);
++        let ready = heap.take_pending_list_flips();
++        assert_eq!(ready.len(), 1);
++        assert_eq!(ready[0].key(), current);
++    }
++
+     #[test]
+     fn pending_list_flips_promote_once_and_clean_up() {
+         let heap = 0xdead_beefusize;
 diff --git a/crates/victory-gpu/src/draw.rs b/crates/victory-gpu/src/draw.rs
-index c09e6930f2a53d36df86f2ae9d046c91cd2688c9..68864c4a9c4e767449ea6f2fd0680d78afec3672 100644
+index c09e6930f2a53d36df86f2ae9d046c91cd2688c9..afdd4575a2e05402209b08f16f0ccc5f752ef101 100644
 --- a/crates/victory-gpu/src/draw.rs
 +++ b/crates/victory-gpu/src/draw.rs
 @@ -543,9 +543,9 @@ pub(crate) struct State {
@@ -468,6 +654,15 @@ index c09e6930f2a53d36df86f2ae9d046c91cd2688c9..68864c4a9c4e767449ea6f2fd0680d78
                  self.root_srv_slots
                      .insert(key, (index, shadow.as_ref().map(|(_, s)| s.clone())));
                  match &shadow {
+@@ -2704,7 +2704,7 @@ impl State {
+         n[0] = 1;
+         for index in self.bake_sources(p, heap) {
+             let Some(handle) = heap.handle(index) else { continue };
+-            let Some((view, key)) = host.prepare_bake_slot(index, handle) else { continue };
++            let Some((view, key)) = host.texture_slot_snapshot(index, handle) else { continue };
+             n[1] += 1;
+             let placed = crate::descriptor::host::placed_texture(&view);
+             let resource = match placed.as_ref().or(Some(&view)) {
 @@ -2838,6 +2838,8 @@ impl State {
              return;
          };
@@ -477,7 +672,97 @@ index c09e6930f2a53d36df86f2ae9d046c91cd2688c9..68864c4a9c4e767449ea6f2fd0680d78
              let began = std::time::Instant::now();
              let mut bake_slot = BAKE_UPLOAD.lock().unwrap_or_else(|e| e.into_inner());
              let gpu = crate::host::host();
-@@ -4565,7 +4567,7 @@ impl State {
+@@ -3300,8 +3302,10 @@ impl State {
+             }
+             let mut partly = None;
+             let mut there = None;
+-            // The view the slot holds now, read once for the looks below.
+-            let held = rest(1, || heap.handle(index).and_then(crate::descriptor::view));
++            // Keep the generation with the view throughout the upload. A
++            // later write to the title slot queues work of its own.
++            let (held, held_key) = rest(1, || heap.handle(index).and_then(|handle| host.texture_slot_snapshot(index, handle)))
++                .map_or((None, None), |(view, key)| (Some(view), Some(key)));
+             if let Some(View::Placed(false, resource, desc)) = &held {
+                 let address = u64::from(desc[10]) | u64::from(desc[11]) << 32;
+                 let first = crate::resource::first_mip(desc);
+@@ -3408,10 +3412,7 @@ impl State {
+                 && rest(1, || heap.handle(index).is_some_and(|handle| !host.texture_slot_made_from(index, handle)));
+             let (view, bake_key) = timed(6, || {
+                 if sync_bake {
+-                    match heap.handle(index).and_then(|handle| host.prepare_bake_slot(index, handle)) {
+-                        Some((view, key)) => (Some(view), Some(key)),
+-                        None => (None, None),
+-                    }
++                    (held.clone(), held_key)
+                 } else if shows_other || late {
+                     // The view read at the start of this slot's turn (read
+                     // again, the views' table was asked twice a slot).
+@@ -3422,10 +3423,12 @@ impl State {
+             });
+             // (`nothing`: the slot has nothing to bring up to date.)
+             let at_once = |nothing: bool| {
+-                if (late || bake_key.is_some()) && let Some(handle) = heap.handle(index) {
++                if (late || bake_key.is_some())
++                    && let (Some(handle), Some(key)) = (heap.handle(index), held_key)
++                {
+                     HEAP_TEXTURE_NOTHING[3].fetch_add(u64::from(nothing), Ordering::Relaxed);
+                     shown(0, || {
+-                        let _ = host.mirror(index, handle, true);
++                        let _ = host.mirror_ready(index, handle, key);
+                     });
+                 }
+             };
+@@ -3477,15 +3480,15 @@ impl State {
+                     }
+                     sync.publish.push((index, handle, key));
+                 } else {
+-                    if shows_other && let Some(handle) = heap.handle(index) {
++                    if shows_other && let (Some(handle), Some(key)) = (heap.handle(index), held_key) {
+                         shown(2, || {
+-                            let _ = host.mirror(index, handle, true);
++                            let _ = host.mirror_ready(index, handle, key);
+                         });
+                     }
+                     // Its bytes are in, or on the way there in a list before.
+                     if late && texture.is_some_and(crate::pool::fresh) && !crate::texture::ahead::there(resource) {
+-                        if let Some(handle) = heap.handle(index) {
+-                            shown(1, || host.texture_slot_show_after(list, index, handle));
++                        if let (Some(handle), Some(key)) = (heap.handle(index), held_key) {
++                            shown(1, || host.texture_slot_show_after(list, index, handle, key));
+                         }
+                     } else {
+                         at_once(false);
+@@ -3515,8 +3518,8 @@ impl State {
+                 use crate::texture::ahead::Taken;
+                 let (Taken::New(job) | Taken::Known(job)) = ahead;
+                 rest(3, || {
+-                    if let Some(handle) = heap.handle(index) {
+-                        host.texture_slot_show_ahead(job, index, handle);
++                    if let (Some(handle), Some(key)) = (heap.handle(index), held_key) {
++                        host.texture_slot_show_ahead(job, index, handle, key);
+                     }
+                     if let Taken::New(job) = ahead {
+                         crate::texture::ahead::send(job);
+@@ -3553,11 +3556,13 @@ impl State {
+                 }
+                 sync.publish.push((index, handle, key));
+             }
+-            if shows_other && let Some(handle) = heap.handle(index) {
+-                shown(2, || host.texture_slot_flip(list, index, handle));
+-            }
+-            if late && let Some(handle) = heap.handle(index) {
+-                shown(1, || host.texture_slot_show_after(list, index, handle));
++            if let (Some(handle), Some(key)) = (heap.handle(index), held_key) {
++                if shows_other {
++                    shown(2, || host.texture_slot_flip(list, index, handle, key));
++                }
++                if late {
++                    shown(1, || host.texture_slot_show_after(list, index, handle, key));
++                }
+             }
+             #[cfg(feature = "diagnostics")]
+             if crate::book::on()
+@@ -4565,7 +4570,7 @@ impl State {
              };
              self.fresh_tables.insert(key, FreshTable { first, epoch: 0, ready: Vec::new() });
              self.dynamic
