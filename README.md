@@ -99,7 +99,7 @@ $experiment = @{
 .\scripts\play-4050.ps1 -Exe 'C:\Path\To\Your\Title.exe' -FrameCsv '.\presents.csv' -More $experiment
 ~~~
 
-Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `05fbd538f47477654e7ebea13a373aa6700b6807`.
+Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `ac2ba0954165330aebe40634cba66aa8657d7cb0`.
 
 ## Shader output and pipeline failures
 
@@ -120,6 +120,19 @@ The previous RTX 4050 run ended in a Direct3D device reset. Its final reported i
 AmericasLauncher selects DoubleGhosty/cool_fox for its NVIDIA CGBJ runner. We built revision `42b95b9` and used that runner's NVIDIA preset with Series X, an isolated save and a cold cache. Local instrumentation selected the RTX 4050 and wrote the same timing CSV. The startup screen presented at about 30 FPS with 13 draws. The scripted run exited with a null-write access violation at the 3D transition before any presents reached 1,000 draws. This run provides startup evidence. [AmericasLauncher runner definitions](https://github.com/isaac-btw/AmericasLauncher/blob/v1.7.5/src/AmericasLauncher/Data/runners.json) · [CGBJ configuration](https://github.com/DoubleGhosty/cool_fox/blob/main/Play-VIctory.cmd)
 
 Set `VICTORY_LIBRARY_STORE_LATER=1` to let a completed pipeline reach draw callers while its entry waits for the host pipeline library to finish saving. The queue holds at most 64 waiting pipeline states, and workers use the synchronous store when the queue fills. All seven pipeline-library tests passed. Gameplay timing and the effect on missing draws remain under evaluation. [CGBJ pipeline-library design](https://github.com/DoubleGhosty/cool_fox/blob/main/crates/victory-gpu/src/pipeline/library.rs)
+
+### Texture-residency comparison
+
+Both runs used the same earlier Series S executable, copies of the same save, DLSS Performance, fixed ambient light, full texture checks and timed normal shutdown. We counted host presents with at least 1,000 draws in the first 120 seconds from the first such present.
+
+| Residency setting | Presents | p50 | p95 | Peak admission accounting |
+| --- | ---: | ---: | ---: | ---: |
+| Omit the largest eligible mip | 46 | 1,636.9 ms | 6,653.5 ms | 6,449 MiB |
+| Request levels on demand | 180 | 154.2 ms | 1,995.8 ms | 4,066 MiB |
+
+The second run loaded a warmer pipeline cache. The GPU supported levels on demand, but the log recorded zero tiled texture allocations. Both runs also reported waiting textures and dropped draws. The measured differences cover two individual boots. Both runs exited normally after the cutoff.
+
+The eligibility fix now considers read-only textures backed by a title-provided address, including textures that request a full mip chain. Reserved mip chains bypass the ordinary texture pool. Sparse uploads refresh staging before mapping the tiles needed by the current upload. Fully mapped assets and textures that the GPU writes retain the ordinary allocation path. The RTX 4050 hardware test passed with both upload submission modes and texture pooling enabled. It verified uploads into a partly mapped chain for explicit and implicit mip counts. Enable this mode with `VICTORY_LEVELS_ON_DEMAND=1` and `VICTORY_TEXTURE_DROP_MIPS=0`. [CGBJ resource implementation](https://github.com/DoubleGhosty/cool_fox/blob/main/crates/victory-gpu/src/resource.rs)
 
 ## Credits and license
 

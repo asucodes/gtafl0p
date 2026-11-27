@@ -336,7 +336,7 @@ index c09e6930f2a53d36df86f2ae9d046c91cd2688c9..0d7ea537e656d3e0c5e71b1831df0f96
              // them it brings up to date here, in the dynamic slots.
              let title_first = heap.index(table).filter(|first| first + n <= host.count());
 diff --git a/crates/victory-gpu/src/host.rs b/crates/victory-gpu/src/host.rs
-index b4baed734b22cb888ce2fe6234fec12acc4baa8b..b1a18a1ef5563a3a1a7945a4a47e61d2907cbaaf 100644
+index b4baed734b22cb888ce2fe6234fec12acc4baa8b..faa212752bf89c0bd1e675da5a8399b649440c1e 100644
 --- a/crates/victory-gpu/src/host.rs
 +++ b/crates/victory-gpu/src/host.rs
 @@ -5,7 +5,7 @@
@@ -508,7 +508,50 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..b1a18a1ef5563a3a1a7945a4a47e61d2
      use super::*;
  
      #[test]
-@@ -8830,7 +8960,11 @@ pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: b
+@@ -2348,6 +2478,8 @@ enum Step {
+     /// Brings a texture's staging buffer up to date: once per submission,
+     /// whichever lists sample it, until a `Copy` or `Run` intervenes.
+     Texture(std::sync::Arc<crate::texture::Staging>),
++    /// Refreshes a sparse staging buffer before the following tile mapping.
++    TextureReady(std::sync::Arc<crate::texture::Staging>),
+     /// Reads a CPU-written linear movie plane into a per-list upload buffer.
+     Plane((usize, usize), Box<dyn Fn() + Send>),
+     /// A title buffer copy that the list does on the card ([`place`]): what
+@@ -3100,7 +3232,7 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
+                         return Some(WHY_READ);
+                     }
+                 }
+-                Step::Texture(staging) => {
++                Step::Texture(staging) | Step::TextureReady(staging) => {
+                     let (at, len) = staging.memory();
+                     if touches(written, at, at + len) {
+                         if count {
+@@ -7658,6 +7790,10 @@ impl HostList {
+         self.deferred().copies.push(Step::Texture(staging));
+     }
+ 
++    pub(crate) fn defer_texture_ready(&self, staging: std::sync::Arc<crate::texture::Staging>) {
++        self.deferred().copies.push(Step::TextureReady(staging));
++    }
++
+     /// [`HostList::defer_texture`] of a texture whose upload the list's
+     /// prelude records if the check finds it due
+     /// (`crate::texture::prelude_uploads`; [`HostList::prelude_uploads`]).
+@@ -7833,6 +7969,13 @@ impl HostList {
+                     }
+                     continue;
+                 }
++                Step::TextureReady(staging) => {
++                    batch.refresh_textures();
++                    if batch.texture_due(staging) {
++                        staging.refresh();
++                    }
++                    continue;
++                }
+                 Step::Plane((_, len), fill) => {
+                     let started = std::time::Instant::now();
+                     fill();
+@@ -8830,7 +8973,11 @@ pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: b
      #[cfg(feature = "diagnostics")]
      let sparse = std::time::Instant::now();
      if !title_dst && len >= 64 << 10 {
@@ -521,7 +564,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..b1a18a1ef5563a3a1a7945a4a47e61d2
      } else {
          read_pieces(src, dst, len);
      }
-@@ -8838,13 +8972,16 @@ pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: b
+@@ -8838,13 +8985,16 @@ pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: b
      crate::copystat::add(crate::copystat::C::SparseUs, sparse.elapsed().as_micros() as u64);
  }
  
@@ -539,7 +582,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..b1a18a1ef5563a3a1a7945a4a47e61d2
      while offset < len {
          let at = src.wrapping_add(offset);
          let to = dst.wrapping_add(offset);
-@@ -8863,6 +9000,16 @@ fn read_sparse(src: *const u8, dst: *mut u8, len: usize) {
+@@ -8863,6 +9013,16 @@ fn read_sparse(src: *const u8, dst: *mut u8, len: usize) {
              if n != 0 {
                  plain = n;
              }
@@ -556,7 +599,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..b1a18a1ef5563a3a1a7945a4a47e61d2
          }
          // SAFETY: the query inspects an address and fills a local structure.
          let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
-@@ -8884,6 +9031,7 @@ fn read_sparse(src: *const u8, dst: *mut u8, len: usize) {
+@@ -8884,6 +9044,7 @@ fn read_sparse(src: *const u8, dst: *mut u8, len: usize) {
          }
          offset += n;
      }
@@ -564,7 +607,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..b1a18a1ef5563a3a1a7945a4a47e61d2
  }
  
  fn read_pieces(src: *const u8, dst: *mut u8, len: usize) {
-@@ -9244,7 +9392,59 @@ struct Presenter {
+@@ -9244,7 +9405,59 @@ struct Presenter {
  /// line at the top of the picture (`menu.rs`).
  pub(crate) static METER_FPS_TENTHS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
  
@@ -624,7 +667,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..b1a18a1ef5563a3a1a7945a4a47e61d2
      since: std::time::Instant,
      frames: u32,
      #[cfg(feature = "diagnostics")]
-@@ -9259,6 +9459,7 @@ impl Meter {
+@@ -9259,6 +9472,7 @@ impl Meter {
      fn new() -> Self {
          let now = std::time::Instant::now();
          Meter {
@@ -632,7 +675,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..b1a18a1ef5563a3a1a7945a4a47e61d2
              since: now,
              frames: 0,
              #[cfg(feature = "diagnostics")]
-@@ -9310,6 +9511,7 @@ impl Meter {
+@@ -9310,6 +9524,7 @@ impl Meter {
          let dropped = crate::draw::take_dropped() as f64 / frames;
          let indirect = crate::list::take_indirect() as f64 / frames;
          let left_out = crate::pipeline::take_left_out() as f64 / frames;
@@ -640,7 +683,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..b1a18a1ef5563a3a1a7945a4a47e61d2
          let mesh_largest = MESH_GROUPS[0].swap(0, Ordering::Relaxed);
          let mesh_groups = MESH_GROUPS[1].swap(0, Ordering::Relaxed) as f64 / frames;
          let refused = BUDGET_NOTES[0].swap(0, Ordering::Relaxed) as f64 / frames;
-@@ -9403,6 +9605,12 @@ impl Meter {
+@@ -9403,6 +9618,12 @@ impl Meter {
          let drops = crate::pipeline::take_drops();
          if self.logged.elapsed() >= std::time::Duration::from_secs(5) {
              self.logged = std::time::Instant::now();
@@ -653,7 +696,7 @@ index b4baed734b22cb888ce2fe6234fec12acc4baa8b..b1a18a1ef5563a3a1a7945a4a47e61d2
              tracing::info!(
                  "placed texture views: {} writes of another view of the texture a slot showed (it kept the old view until the new was made)",
                  crate::descriptor::host::KEPT_VIEWS.load(Ordering::Relaxed)
-@@ -10026,8 +10234,15 @@ impl Host {
+@@ -10026,8 +10247,15 @@ impl Host {
                  },
              );
              let called = crate::streamline::present_called(&presenting);
@@ -688,6 +731,32 @@ index b46cf61aaa2027387dea128752a620fe82941038..80bf02979858c0b7756c2b1fc1755137
              })
              .ok()
              .map(|_| Mutex::new(send))
+diff --git a/crates/victory-gpu/src/host/card_steps.rs b/crates/victory-gpu/src/host/card_steps.rs
+index 166addd3013a61fdfc7d347083d734babb52d4ad..605a1bcb8b2fee6ab55f14b4368a189b15155a31 100644
+--- a/crates/victory-gpu/src/host/card_steps.rs
++++ b/crates/victory-gpu/src/host/card_steps.rs
+@@ -433,7 +433,7 @@ fn does_of(written: &[(usize, usize)], runs: &[&HostList]) -> (Vec<Does>, Vec<(u
+                     asked: read_blocked(written, *src, *len),
+                     to: to.is_some(),
+                 },
+-                Step::Texture(staging) => {
++                Step::Texture(staging) | Step::TextureReady(staging) => {
+                     let (at, len) = staging.memory();
+                     Does::Read {
+                         from: at,
+diff --git a/crates/victory-gpu/src/host/place.rs b/crates/victory-gpu/src/host/place.rs
+index b5a7bb7638cb58f727f519ca9ec80bcd2645a9d6..b058cebd5c2213937b2f0b19ccf075bbb0d1d990 100644
+--- a/crates/victory-gpu/src/host/place.rs
++++ b/crates/victory-gpu/src/host/place.rs
+@@ -115,7 +115,7 @@ pub(super) fn read_by(runs: &[&HostList], mut ranges: Vec<(usize, usize)>) -> bo
+     runs.iter().any(|list| {
+         list.deferred().copies.iter().any(|step| match step {
+             &Step::Copy(_, src, len) | &Step::Fill(_, src, len, _) => touches(&ranges, src, src + len),
+-            Step::Texture(staging) => {
++            Step::Texture(staging) | Step::TextureReady(staging) => {
+                 let (at, len) = staging.memory();
+                 touches(&ranges, at, at + len)
+             }
 diff --git a/crates/victory-gpu/src/inplace.rs b/crates/victory-gpu/src/inplace.rs
 index 4bb00c4b0a02313b84766a3112a888c2192bb9c9..546f2e40c6daace141766ae36c9eae924986f325 100644
 --- a/crates/victory-gpu/src/inplace.rs
@@ -1430,7 +1499,7 @@ index 22edcf3d9a7e95cf641ffaf74e3e2007a86da113..cfbb13b206f1f5aaea0e4dcd24f929cc
              assert_eq!(second.bias, 0);
              // The title's views may change under the heap.
 diff --git a/crates/victory-gpu/src/resource.rs b/crates/victory-gpu/src/resource.rs
-index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..4034e73573a43c6a5ec8a0f03dffb2fce3266341 100644
+index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..923788ecc8695dce7309b443f69179b32857e716 100644
 --- a/crates/victory-gpu/src/resource.rs
 +++ b/crates/victory-gpu/src/resource.rs
 @@ -1624,6 +1624,94 @@ fn fills(desc: &ResourceDesc) -> bool {
@@ -1528,19 +1597,50 @@ index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..4034e73573a43c6a5ec8a0f03dffb2fc
  /// Whether the title fills texture `this` itself ([`fills`]).
  #[cfg(windows)]
  pub(crate) fn title_fills(this: This) -> bool {
-@@ -1677,7 +1765,10 @@ fn hosted(this: This, make: bool) -> Option<Made> {
+@@ -1663,8 +1751,8 @@ fn hosted(this: This, make: bool) -> Option<Made> {
+             .clear
+             .as_ref()
+             .map_or(std::ptr::null(), |c| std::ptr::from_ref(c).cast::<c_void>());
+-        // Levels on demand (`crate::tiles`): a texture the title places in
+-        // memory and fills, of a megabyte or more, that does not hold all
++        // Levels on demand (`crate::tiles`): a texture the title places or
++        // makes over its own address, then fills, that does not hold all
+         // its levels now, is made without memory and given it level by
+         // level. It does not hold them all if its memory is not all
+         // mapped, if the next texture starts inside its span, or if a
+@@ -1673,12 +1761,19 @@ fn hosted(this: This, make: bool) -> Option<Made> {
+         const TEXTURE_2D: u32 = 3;
+         let mut tiled = None;
+         let mut texture = None;
++        let levels = mip_count(&r.desc);
+         let shape_fits = fills(&r.desc)
              && r.desc.dimension == TEXTURE_2D
              && r.desc.depth_or_array_size == 1
-             && r.desc.mip_levels > 1
+-            && r.desc.mip_levels > 1
 -            && r.desc.sample_count <= 1;
+-        if shape_fits && r.host.placed.load(Relaxed) && crate::tiles::wanted() {
++            && levels > 1
 +            && r.desc.sample_count <= 1
 +            // The tile path numbers levels as the title does; a texture
 +            // whose host copy leaves out levels stays on the plain path.
 +            && drop_levels(&r.desc) == 0;
-         if shape_fits && r.host.placed.load(Relaxed) && crate::tiles::wanted() {
++        if shape_fits
++            && (r.host.placed.load(Relaxed) || matches!(&r.backing, Backing::Address(_)))
++            && crate::tiles::wanted()
++        {
              let bytes = footprint(&r.desc).map_or(0, |f| f.size);
              let start = r.data() as u64;
-@@ -1703,7 +1794,7 @@ fn hosted(this: This, make: bool) -> Option<Made> {
+             // What the upload can read: a console layout, no XOR mode
+@@ -1693,7 +1788,7 @@ fn hosted(this: This, make: bool) -> Option<Made> {
+             let cut = reserved
+                 .as_ref()
+                 .zip(crate::host::host())
+-                .and_then(|(t, host)| crate::tiles::Tiled::make(&host.device, t, u32::from(r.desc.mip_levels)));
++                .and_then(|(t, host)| crate::tiles::Tiled::make(&host.device, t, levels));
+             // (Both or neither: a reserved texture the card will not cut
+             // into tiles is dropped here, and the old kind is made below.)
+             if cut.is_some() {
+@@ -1703,7 +1798,7 @@ fn hosted(this: This, make: bool) -> Option<Made> {
          }
          // The levels views show ([`held_only`]), those of the slots shaders
          // pick by index among them.
@@ -1549,7 +1649,98 @@ index ab2931ab6d8946b07aa6f59c0d6a84a615f7cff8..4034e73573a43c6a5ec8a0f03dffb2fc
          if shape_fits && r.host.placed.load(Relaxed) && held_only() && alias_of(this).is_none() {
              let wanted = r.host.wanted.load(Relaxed);
              let viewed = crate::descriptor::host::first_viewed(r.data() as u64).unwrap_or(u32::MAX);
-@@ -4061,6 +4152,310 @@ mod tests {
+@@ -2711,8 +2806,10 @@ fn host_texture_as(
+     };
+     // A texture the title fills, whose every subresource is uploaded before
+     // anything reads it: cut from a block (what the piece held before shows
+-    // in no texel).
+-    if fills(desc)
++    // in no texel). A sparse resource bypasses this pool so its levels
++    // can receive only the tiles they need.
++    if !reserved
++        && fills(desc)
+         && d.sample_count <= 1
+         && clear_value.is_none()
+         && texture_layout(desc).is_some_and(|t| !t.planes[0].layout.desc.swizzle.xor())
+@@ -3599,6 +3696,77 @@ mod tests {
+         }
+     }
+ 
++    #[cfg(windows)]
++    #[test]
++    #[ignore = "requires a tier 2 D3D12 GPU and VICTORY_LEVELS_ON_DEMAND=1"]
++    fn title_address_texture_reserves_only_streamed_levels() {
++        use windows::Win32::Graphics::Direct3D12::{
++            D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE, D3D12_TEXTURE_LAYOUT_UNKNOWN,
++        };
++        use windows_sys::Win32::System::Memory::{
++            MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
++        };
++
++        assert!(crate::tiles::wanted(), "requires VICTORY_LEVELS_ON_DEMAND=1 and tiled resources");
++        struct Allocation(*mut std::ffi::c_void);
++        impl Drop for Allocation {
++            fn drop(&mut self) {
++                unsafe { VirtualFree(self.0, 0, MEM_RELEASE) };
++            }
++        }
++
++        struct TitleTexture(This);
++        impl Drop for TitleTexture {
++            fn drop(&mut self) {
++                crate::object::release(self.0);
++            }
++        }
++
++        for (levels, fully_mapped, flags) in [(12, false, 0), (0, false, 0), (12, true, 0), (12, false, 4)] {
++            let desc = ResourceDesc { flags, ..texture(2048, 2048, 28, levels) };
++            let size = footprint(&desc).unwrap().size as usize;
++            let address = unsafe { VirtualAlloc(std::ptr::null(), size, MEM_RESERVE, PAGE_READWRITE) };
++            assert!(!address.is_null());
++            let _pages = Allocation(address);
++            let mapped = if fully_mapped { size } else { 65536 };
++            let committed = unsafe { VirtualAlloc(address, mapped, MEM_COMMIT, PAGE_READWRITE) };
++            assert_eq!(committed, address);
++            unsafe { std::ptr::write_bytes(address.cast::<u8>(), 0x5a, mapped) };
++
++            let mut title = std::ptr::null();
++            assert_eq!(
++                create_at_address(std::ptr::null(), address as u64, &desc, 0, std::ptr::null(), &RESOURCE_IIDS[0], &mut title),
++                S_OK
++            );
++            let _title = TitleTexture(title);
++            let r = resource(title);
++            assert!(!r.host.placed.load(std::sync::atomic::Ordering::Relaxed));
++            let host = host_resource(title).unwrap();
++            let host_desc = unsafe { host.GetDesc() };
++            assert_eq!(host_desc.MipLevels, 12);
++            assert_eq!((host_desc.Width, host_desc.Height), (2048, 2048));
++
++            let held = r.host.made.lock().unwrap().as_ref().unwrap().0.clone();
++            if fully_mapped || flags != 0 {
++                assert_eq!(host_desc.Layout, D3D12_TEXTURE_LAYOUT_UNKNOWN);
++                assert!(held.tiled.is_none());
++                continue;
++            }
++
++            assert_eq!(host_desc.Layout, D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE, "mip count {levels}");
++            let tiled = held.tiled.as_ref().expect("reserved mip chain");
++            assert_eq!(tiled.given_bytes(), 0);
++            let gpu = crate::host::host().unwrap();
++            let list = gpu.new_list().unwrap();
++            crate::texture::upload(&list, title, host);
++            list.close();
++            gpu.execute_sync_internal(&list);
++            assert!(tiled.given_bytes() > 0, "mapped tail gets tiles after upload");
++            assert!(tiled.given_bytes() < size as u64, "unmapped levels still have no tiles");
++            assert!(unsafe { gpu.device.GetDeviceRemovedReason().is_ok() });
++        }
++    }
++
+     fn heap(size: u64) -> This {
+         let desc = HeapDesc {
+             size,
+@@ -4061,6 +4229,310 @@ mod tests {
          }
      }
  
@@ -2097,7 +2288,7 @@ index 5b7a2fcf7a6b6f50306400571f91f76390a6d0fd..e5b13e89473d99fc3708757dc75d4275
          let len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
          Some((String::from_utf16_lossy(&desc.Description[..len]), desc.AdapterLuid))
 diff --git a/crates/victory-gpu/src/texture.rs b/crates/victory-gpu/src/texture.rs
-index 17955a108c0b678eee42a8ba01af0ad4337263f3..e73d50ab3c2ab7c70385fb1edc892b3f5c8555bf 100644
+index 17955a108c0b678eee42a8ba01af0ad4337263f3..a839a40b91c66535d377c8e9273df7603dafea43 100644
 --- a/crates/victory-gpu/src/texture.rs
 +++ b/crates/victory-gpu/src/texture.rs
 @@ -181,6 +181,11 @@ pub(crate) fn alias(list: &HostList, placed: This, source: This) -> bool {
@@ -2112,6 +2303,15 @@ index 17955a108c0b678eee42a8ba01af0ad4337263f3..e73d50ab3c2ab7c70385fb1edc892b3f
      let (Some(to), Some(from)) = (
          crate::resource::host_resource(placed),
          crate::resource::host_resource(source),
+@@ -925,7 +930,7 @@ pub(crate) fn upload_from(list: &HostList, resource: This, first: u32) {
+         list.defer_host(move || noted.note_held());
+         return;
+     };
+-    list.defer_texture(staging.clone());
++    list.defer_texture_ready(staging.clone());
+     list.defer_host(move || {
+         let waiting = on_demand.uploaded(staging.detiled.load(Relaxed), staging.memory as u64);
+         staging.waiting.store(if waiting { crate::host::moment().max(1) } else { 0 }, Relaxed);
 diff --git a/crates/victory-gpu/src/watch.rs b/crates/victory-gpu/src/watch.rs
 index 151de09037554acac00cc8e1e3a947cf650908ea..eb7e931dee33c8e6b004c0a740294fbce5272dfd 100644
 --- a/crates/victory-gpu/src/watch.rs
