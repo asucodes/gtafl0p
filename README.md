@@ -99,7 +99,7 @@ $experiment = @{
 .\scripts\play-4050.ps1 -Exe 'C:\Path\To\Your\Title.exe' -FrameCsv '.\presents.csv' -More $experiment
 ~~~
 
-Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `5ba859eaf3a14a3b7e904572ab703d1e9a738bee`.
+Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `bcb6ad988639dce5881d385a66c3c296c839d48f`.
 
 ## Shader output and pipeline failures
 
@@ -173,6 +173,12 @@ In the preceding prologue run, the most frequent logged drops were passes disabl
 ### Texture subresources in captured frames
 
 The operation trace now records the title's texture view, the host allocation generation and its mip bounds. It also distinguishes explicit title subresource transitions from enhanced barrier groups currently mapped to global UAV ordering. An isolated Series S prologue run on the RTX 4050 recorded three frames and exited normally. Across the three traces, 33 dispatches from 15 compute programs bound disjoint read and write mips on the same allocation. One depth-pyramid dispatch read mip 3 and wrote mips 4 through 7. VIctory's current whole-texture state cannot represent that access pattern. The trace confirms a state-tracking gap. The rendering change and its effect on exposure, transmission and frame time are still pending.
+
+### Independent mip states
+
+Set `VICTORY_TEXTURE_MIP_STATES=1` in the launcher's `-More` settings to test the opt-in implementation. Eligible 2D textures keep independent mip states inside a command list, then return to a uniform state at handoff for existing upload and readback paths. Two state-transition tests passed. Three RTX 4050 prologue captures recorded 265 host mip transitions, including 3 depth-pyramid, 3 lightmap and 6 mip-generation dispatches with the expected transitions. The run closed normally.
+
+The last heavy window measured 98.2 ms median and 142.1 ms p95 over 79 presents, compared with 123.0 ms and 638.9 ms over 71 presents in the preceding baseline. The first window was slower at 907.1 ms median and 3,643.6 ms p95, compared with 257.0 ms and 670.3 ms. The camera and streaming timelines differed. This run confirms the new barrier path and leaves both image quality and sustained performance unverified.
 
 ## Current VIctory-NVIDIA comparison
 
