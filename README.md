@@ -31,7 +31,9 @@ Both mirror runs used the Series S profile, DLSS Performance, no generated frame
 | 1 MiB | 81 | 706.3 ms | 4,645.3 ms | 18,077 MiB |
 | 4 MiB | 89 | 600.2 ms | 4,352.3 ms | 17,430 MiB |
 
-These are startup samples with the same 120-second, 1,000-draw selection and nearest-rank method described above. The 4 MiB run used the shutdown fix and a warmer pipeline cache. Gameplay progression and an isolated performance effect remain unverified. The mirror grid stays at 4 MiB, with an optional release census for logical mirror sizes. [1 MiB samples](diagnostics/rtx4050-2026-11-27-mirror-1024k.tsv.txt) ? [4 MiB samples](diagnostics/rtx4050-2026-11-27-mirror-4096k.tsv.txt)
+These are startup samples with the same 120-second, 1,000-draw selection and nearest-rank method described above. The 4 MiB run used the shutdown fix and a warmer pipeline cache. Gameplay progression and an isolated performance effect remain unverified. The mirror grid stays at 4 MiB, with an optional release census for logical mirror sizes. [1 MiB samples](diagnostics/rtx4050-2026-11-27-mirror-1024k.tsv.txt) · [4 MiB samples](diagnostics/rtx4050-2026-11-27-mirror-4096k.tsv.txt)
+
+Set `VICTORY_WINDOW_LAYOUT=1` to sample how live loose GPU buffers map onto memory sections. For windows above 4 GiB that cover aligned contiguous section bytes, the release reports both total window bytes and unique backing bytes. It also reports windows crossing gaps or scattered pages, windows with no mapped view at their first byte, and the time each sample takes. Samples start at 64 windows and are spaced at least 30 seconds apart. These are logical ranges. Windows decides which pages are physically resident.
 
 ## Submission memory planner
 
@@ -89,7 +91,7 @@ $experiment = @{
 .\scripts\play-4050.ps1 -Exe 'C:\Path\To\Your\Title.exe' -FrameCsv '.\presents.csv' -More $experiment
 ~~~
 
-Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `595a9741024a1cc7faf205f04945ac9d50dc1dec`.
+Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `39fff9d5037f06def5b1c27c296cd0274e3bd9be`.
 
 ## Credits and license
 

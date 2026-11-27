@@ -581,7 +581,7 @@ index 22edcf3d9a7e95cf641ffaf74e3e2007a86da113..cfbb13b206f1f5aaea0e4dcd24f929cc
              assert_eq!(second.bias, 0);
              // The title's views may change under the heap.
 diff --git a/crates/victory-gpu/src/shadow.rs b/crates/victory-gpu/src/shadow.rs
-index 18bdfa29456f3491d3ea460f0431a9ac3ce8bd84..dd8acc39b5b7f9ee071985552706178472e4e8a9 100644
+index 18bdfa29456f3491d3ea460f0431a9ac3ce8bd84..b44dbbe1ba014251730f6d9b9721d606e13885e7 100644
 --- a/crates/victory-gpu/src/shadow.rs
 +++ b/crates/victory-gpu/src/shadow.rs
 @@ -1562,8 +1562,10 @@ fn workers() -> &'static Workers {
@@ -607,12 +607,84 @@ index 18bdfa29456f3491d3ea460f0431a9ac3ce8bd84..dd8acc39b5b7f9ee0719855527061784
          // Each copy once: a window may stand under several keys.
          let mut seen = std::collections::HashSet::new();
          let bytes: u64 = loose
-@@ -3075,6 +3076,25 @@ pub(crate) fn memory() -> [u64; 6] {
+@@ -3075,6 +3076,97 @@ pub(crate) fn memory() -> [u64; 6] {
      ]
  }
  
++/// Capture the loose buffers without holding the renderer lock while walking the
++/// mapping table. These totals describe range layouts, not physical residency.
++fn window_layout_line() {
++    if !crate::asked_for!("VICTORY_WINDOW_LAYOUT") {
++        return;
++    }
++    static LAST: AtomicU64 = AtomicU64::new(0);
++    let now = crate::host::now_ms();
++    let last = LAST.load(Ordering::Relaxed);
++    if last != 0 && now.saturating_sub(last) < 30_000 {
++        return;
++    }
++    let began = std::time::Instant::now();
++    let spans: Vec<_> = {
++        let map = LOOSE.read().unwrap_or_else(|e| e.into_inner());
++        if map.len() < 64 || LAST.compare_exchange(last, now.max(1), Ordering::Relaxed, Ordering::Relaxed).is_err() {
++            return;
++        }
++        let mut seen = std::collections::HashSet::new();
++        map.values()
++            .filter(|s| seen.insert(s.id))
++            .map(|s| (s.start, s.len, s.in_place(), s.written.load(Ordering::Relaxed)))
++            .collect()
++    };
++    let mut direct = 0;
++    let mut continuous = 0;
++    let mut high_aligned = 0;
++    let mut high_written = 0;
++    let mut scattered = 0;
++    let mut holes = 0;
++    let mut no_first = 0;
++    let mut section_runs = BTreeMap::<usize, Vec<(u64, u64)>>::new();
++    for (start, len, placed, written) in spans {
++        if placed {
++            direct += len;
++            continue;
++        }
++        match crate::inplace::cover(start as usize, len as usize) {
++            crate::inplace::Cover::Run(section, offset) => {
++                continuous += len;
++                if start >= 1 << 32 && offset.is_multiple_of(64 << 10) {
++                    high_aligned += len;
++                    if written {
++                        high_written += len;
++                    }
++                    section_runs.entry(section).or_default().push((offset, len));
++                }
++            }
++            crate::inplace::Cover::Scattered => scattered += len,
++            crate::inplace::Cover::Holes => holes += len,
++            crate::inplace::Cover::None => no_first += len,
++        }
++    }
++    let high_unique: u64 = section_runs.values_mut().map(|runs| {
++        runs.sort_unstable();
++        cover(runs.iter().copied())
++    }).sum();
++    tracing::info!(
++        already_direct_mib = direct >> 20,
++        continuous_mib = continuous >> 20,
++        high_aligned_mib = high_aligned >> 20,
++        high_unique_section_mib = high_unique >> 20,
++        high_declared_writable_mib = high_written >> 20,
++        scattered_mib = scattered >> 20,
++        holes_mib = holes >> 20,
++        no_view_at_start_mib = no_first >> 20,
++        elapsed_us = began.elapsed().as_micros() as u64,
++        "loose buffer section layout"
++    );
++}
++
 +/// Reports logical mirror sizes in release builds for allocator comparisons.
 +pub(crate) fn memory_line() {
++    window_layout_line();
 +    if !crate::asked_for!("VICTORY_SHADOW_CENSUS") {
 +        return;
 +    }
@@ -633,7 +705,7 @@ index 18bdfa29456f3491d3ea460f0431a9ac3ce8bd84..dd8acc39b5b7f9ee0719855527061784
  // SAFETY: D3D12 resources are free-threaded; `data` is a persistent mapping
  // written only on the submitting thread.
  unsafe impl Send for Shadow {}
-@@ -4092,7 +4112,11 @@ impl Shadow {
+@@ -4092,7 +4184,11 @@ impl Shadow {
          // Pages taken before and written since: in the order of their runs.
          let mut again_at: Vec<(usize, u64)> = Vec::new();
          let last = (to - 1) / PAGE;
@@ -646,7 +718,7 @@ index 18bdfa29456f3491d3ea460f0431a9ac3ce8bd84..dd8acc39b5b7f9ee0719855527061784
              let write = match writes.peek() {
                  Some(&&(p, w)) if p == page => {
                      writes.next();
-@@ -4124,6 +4148,11 @@ impl Shadow {
+@@ -4124,6 +4220,11 @@ impl Shadow {
              } else if let Some((first, known)) = run.take() {
                  runs.push(((first * PAGE).max(from), (page * PAGE).min(to), known));
              }
@@ -658,7 +730,7 @@ index 18bdfa29456f3491d3ea460f0431a9ac3ce8bd84..dd8acc39b5b7f9ee0719855527061784
          }
          // Cut to the range: next to it shaders may be writing the copy.
          if let Some((first, known)) = run {
-@@ -5528,27 +5557,31 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
+@@ -5528,27 +5629,31 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
              shadow.unsized_asks.fetch_add(1, Ordering::Relaxed);
          }
      };
