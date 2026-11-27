@@ -99,7 +99,7 @@ $experiment = @{
 .\scripts\play-4050.ps1 -Exe 'C:\Path\To\Your\Title.exe' -FrameCsv '.\presents.csv' -More $experiment
 ~~~
 
-Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `7dc51f3e85a41b4cc618c96e5ebb85d7ff044201`.
+Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `f1a672714bb7c6cbf0c67c988ce38d744fcbb754`.
 
 ## Shader output and pipeline failures
 
@@ -109,7 +109,7 @@ Set `VICTORY_PIPELINE_FAILURES=1` to count requests for pipelines whose build ha
 
 Set `VICTORY_WRITE_EPOCH_INDEX=1` to try a coarse write-epoch bound on already mirrored submission ranges. The original page journal still checks each range for which the bound is inconclusive. All 52 write-watch tests passed with it enabled. Live frame-time impact remains unverified.
 
-## Credits and license
+## Texture residency on 6 GiB\n\nSet `VICTORY_TEXTURE_DROP_MIPS=1` to omit the largest mip when creating eligible sampled textures on the host. Render targets, depth and storage textures retain their full size. Descriptors and copy operations account for the new first mip. The descriptor-range regression and two D3D12 readback tests passed. Readback was tested with the option off and on, and the Windows release built successfully. The option remains off by default while in-game image quality and frame time are measured. [Upstream change](https://github.com/miaohaixiang1-netizen/cool-fox-12gb/commit/fcb4f71bbb90de568db5a98aadee1a635e90e6f9)\n\nThe previous RTX 4050 run ended in a Direct3D device reset. Its final reported interval was 4,785 ms, including 4,197 ms of CPU preparation. The texture-admission accounting was 4,266 MiB against a 3,606 MiB threshold. The release log could not identify the triggering GPU command. This experiment addresses texture pressure. Its effect on the crash and black skin is still open.\n\n## Credits and license
 
 **Marvisak and the VIctory contributors** built the loader, runtime, Direct3D 12 renderer and shader translator that make this work possible. **fxceless and the victory-fork contributors** maintain the parent of this repository. **trustno1-coder and the VIctory-NVIDIA contributors** built the NVIDIA line tested here. Individual backports are credited above. [VIctory](https://github.com/Marvisak/VIctory) · [victory-fork](https://github.com/fxceless/victory-fork) · [VIctory-NVIDIA](https://github.com/trustno1-coder/VIctory-NVIDIA)
 
