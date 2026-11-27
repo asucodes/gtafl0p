@@ -99,7 +99,15 @@ $experiment = @{
 .\scripts\play-4050.ps1 -Exe 'C:\Path\To\Your\Title.exe' -FrameCsv '.\presents.csv' -More $experiment
 ~~~
 
-Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `eff8ff15767ed5b439157016bc6f2d0b369130d5`.
+Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `7dc51f3e85a41b4cc618c96e5ebb85d7ff044201`.
+
+## Shader output and pipeline failures
+
+Set `VICTORY_NAN_SCRUB=1` to clear NaNs and infinities on floating-point color exports and floating-point image stores before they reach later rendering passes. The switch is part of the shader cache key. This is an opt-in backport from miaohaixiang1-netizen. Finite output validation passed. A hardware atomic test failed pipeline creation with the switch off and on. The effect on the black-face and overexposure scenes on the RTX 4050 is awaiting an in-game comparison. [Upstream change](https://github.com/miaohaixiang1-netizen/cool-fox-12gb/commit/db556df3a812f1d301af37ad06c878a8e82aba86)
+
+Set `VICTORY_PIPELINE_FAILURES=1` to count requests for pipelines whose build has completed unsuccessfully. The report ranks affected pipelines by use count and distinguishes unavailable shader translations from other pipeline-creation failures. Existing frame counters also include other draw paths and bind failures. Eight pipeline tests passed.
+
+Set `VICTORY_WRITE_EPOCH_INDEX=1` to try a coarse write-epoch bound on already mirrored submission ranges. The original page journal still checks each range for which the bound is inconclusive. All 52 write-watch tests passed with it enabled. Live frame-time impact remains unverified.
 
 ## Credits and license
 
