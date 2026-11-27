@@ -99,7 +99,7 @@ $experiment = @{
 .\scripts\play-4050.ps1 -Exe 'C:\Path\To\Your\Title.exe' -FrameCsv '.\presents.csv' -More $experiment
 ~~~
 
-Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `5ce550fc0ab04150054dcf94e2477e905ea1c8b4`.
+Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `5ba859eaf3a14a3b7e904572ab703d1e9a738bee`.
 
 ## Shader output and pipeline failures
 
@@ -169,6 +169,10 @@ We tested an alternate scheduler that finishes indexed copy batches without runn
 The candidate reused the submission's existing write-watch coverage across copy batches. The copy and write-invalidation checks passed. Eight alternating synthetic trials on the laptop averaged 29.62 ms per frame for the baseline and 30.42 ms for the candidate. The renderer source was restored.
 
 In the preceding prologue run, the most frequent logged drops were passes disabled by the current renderer policy. The ray-tracing structure builder alone reached 4,906 dropped dispatches per frame in one interval. The first individually identified missing host pipeline was the disabled decal heap relocation pass. The separate Wave64 translation failure was for a different compute shader, and the trace did not connect that shader to a visible defect. DLSS subsequently reported successful upscales in the scene. The exposure and lighting defects still need a trace from each missing or stale pass output to its first consumer.
+
+### Texture subresources in captured frames
+
+The operation trace now records the title's texture view, the host allocation generation and its mip bounds. It also distinguishes explicit title subresource transitions from enhanced barrier groups currently mapped to global UAV ordering. An isolated Series S prologue run on the RTX 4050 recorded three frames and exited normally. Across the three traces, 33 dispatches from 15 compute programs bound disjoint read and write mips on the same allocation. One depth-pyramid dispatch read mip 3 and wrote mips 4 through 7. VIctory's current whole-texture state cannot represent that access pattern. The trace confirms a state-tracking gap. The rendering change and its effect on exposure, transmission and frame time are still pending.
 
 ## Current VIctory-NVIDIA comparison
 
