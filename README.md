@@ -142,6 +142,12 @@ With levels on demand enabled, `VICTORY_SPARSE_TEXTURE_READ=1` reads and hashes 
 
 One Series S boot with the switch enabled closed normally after the timed window. The renderer reported 958 active tiled textures at its peak and zero shortened texture reads. There were only six presents with at least 1,000 draws during that window. The capture establishes that this option did not reduce source reads in that boot. Keep it off by default. [Opening capture](diagnostics/rtx4050-2026-11-27-sparse-mip-read.tsv.txt)
 
+### Same-session submission comparison
+
+A diagnostic Series S run alternated asynchronous submission every 25 seconds, with one present allowed in the queue. The gameplay timing gate required 18 of 24 consecutive presents to reach at least 1,000 draws. The timed window contained 320 heavy host presents, with 149.5 ms median and 1,421.8 ms p95 across both modes. The run closed normally.
+
+In two later phases, the title-side median was 215.0 ms with the worker off and 119.4 ms with it on. Those phases averaged 4,804 and 4,397 draws. Earlier phases overlapped loading and there was no full switch-back phase after that comparison. The setting stays experimental. Image quality and input latency still need direct verification.
+
 ## Credits and license
 
 **Marvisak and the VIctory contributors** built the loader, runtime, Direct3D 12 renderer and shader translator that make this work possible. **fxceless and the victory-fork contributors** maintain the parent of this repository. **trustno1-coder and the VIctory-NVIDIA contributors** built the NVIDIA line tested here. Individual backports are credited above. [VIctory](https://github.com/Marvisak/VIctory) · [victory-fork](https://github.com/fxceless/victory-fork) · [VIctory-NVIDIA](https://github.com/trustno1-coder/VIctory-NVIDIA)
