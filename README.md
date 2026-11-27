@@ -154,7 +154,7 @@ The diagnostics build can capture just the chosen frames. Set `VICTORY_CAPTURE_W
 
 ### Texture upload and descriptor generations
 
-The upload paths keep the descriptor generation they selected. A deferred completion can expose that view only while the title slot still names that generation. The immediate path keeps its existing GPU fence and descriptor-retirement handling. This prevents an old upload from making a replacement texture appear ready. On the RTX 4050, three targeted tests passed, including a regression that rewrites the slot between selection and completion registration. The tests verify the resource handoff. Scene appearance and frame rate require a separate run.
+The upload paths keep the descriptor generation they selected. A deferred completion can expose that view only while the title slot still names that generation. The immediate path keeps its existing GPU fence and descriptor-retirement handling. This prevents an old upload from making a replacement texture appear ready. On the RTX 4050, three targeted tests passed, including a regression that rewrites the slot between selection and completion registration. The tests verify the resource handoff. The rebuilt renderer then reached the prologue, captured three frames and exited normally. Its first 64 heavy presents measured 737.4 ms median and 3,100.5 ms p95. A later 79-present window measured 90.5 ms median and 576.3 ms p95. Washed-out exposure and purple artifacts are still visible. The smoke test establishes that the renderer runs with the change.
 
 ## Current VIctory-NVIDIA comparison
 
