@@ -35,6 +35,8 @@ These are startup samples with the same 120-second, 1,000-draw selection and nea
 
 Set `VICTORY_WINDOW_LAYOUT=1` to sample how live loose GPU buffers map onto memory sections. For windows above 4 GiB that cover aligned contiguous section bytes, the release reports both total window bytes and unique backing bytes. It also reports windows crossing gaps or scattered pages, windows with no mapped view at their first byte, and the time each sample takes. Samples start at 64 windows and are spaced at least 30 seconds apart. These are logical ranges. Windows decides which pages are physically resident.
 
+Set `VICTORY_SPARSE_SECTION_READ=1` to use the runtime's view map after a bulk host mirror read fails. Readable mapped ranges can skip a Windows memory query. Gaps and inaccessible views still use the existing Windows fallback. The optional layout report now also counts section-backed bytes inside partially mapped windows. Nine mapping tests and the targeted sparse-copy tests passed on Windows. Live performance is under evaluation.
+
 ### Opening stability on the RTX 4050
 
 The capture reached the prison interior with rendered character hair, clothing and lighting. The player reported moving around at about 10 FPS. The test recorded 10,540 host presents with at least 1,000 draws over 13 minutes 37 seconds, then suspended through the Windows close path and exited with code 0. The median was 60.9 ms and p95 was 101.8 ms. In the first two minutes of heavy rendering those figures were 1,273.2 ms and 7,704.4 ms. The run measured an opening scene and did not verify a full mission. [Host present samples](diagnostics/rtx4050-2026-11-27-opening-stability.tsv.txt)
@@ -97,7 +99,7 @@ $experiment = @{
 .\scripts\play-4050.ps1 -Exe 'C:\Path\To\Your\Title.exe' -FrameCsv '.\presents.csv' -More $experiment
 ~~~
 
-Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `39fff9d5037f06def5b1c27c296cd0274e3bd9be`.
+Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `eff8ff15767ed5b439157016bc6f2d0b369130d5`.
 
 ## Credits and license
 
