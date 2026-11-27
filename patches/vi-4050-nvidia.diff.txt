@@ -1,0 +1,1063 @@
+diff --git a/crates/victory-gpu/src/cores.rs b/crates/victory-gpu/src/cores.rs
+index 0e1ad30..f6a797f 100644
+--- a/crates/victory-gpu/src/cores.rs
++++ b/crates/victory-gpu/src/cores.rs
+@@ -111,6 +111,54 @@ fn ask(what: &str, from: u32) {
+     }
+ }
+
++/// Whether the threads the submitting thread waits for run at its priority
++/// (`VICTORY_HELPER_PRIORITY`, on with `1`; `VICTORY_AB` can flip it while
++/// the title runs): above normal, ahead of the title's threads and of the
++/// threads that translate lists. They are the threads that spread its work
++/// (`shadow::wide`, the pools of `land`), the one that makes the heaps'
++/// records and the one that passes over the heap's views beside the lists.
++///
++/// On a processor with six cores (i5-12400F, 12 threads) the title's threads
++/// and eight translating lists kept every core busy, and the submitting
++/// thread (above normal since `queue::behind`) stood waiting for helpers at
++/// normal priority that were not running. Measured with `VICTORY_AB` in one
++/// run (run10, Series S at 540p, medians of 5-second windows in the world,
++/// off / on): 8.6 / 9.6 fps, refreshes 23.1 / 17.6 ms a frame, waiting for
++/// the heaps' records 6.2 / 2.5 ms, the card idle behind the submitting
++/// thread 24.7 / 13.2 ms. Lowering the translating threads below normal as
++/// well made each list call about 5 % slower, with no clear gain of its own.
++fn helpers_raised() -> bool {
++    crate::asked_for!("VICTORY_HELPER_PRIORITY")
++}
++
++/// A helper's priority ([`helpers_raised`]). [`Self::keep`] is called before
++/// each piece of work; it asks the system only when the switch has changed.
++pub(crate) struct Priority {
++    applied: Option<bool>,
++}
++
++impl Priority {
++    pub(crate) fn new() -> Self {
++        let mut priority = Self { applied: None };
++        priority.keep();
++        priority
++    }
++
++    pub(crate) fn keep(&mut self) {
++        use windows_sys::Win32::System::Threading::{
++            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL, THREAD_PRIORITY_NORMAL,
++        };
++        let on = helpers_raised();
++        if self.applied == Some(on) {
++            return;
++        }
++        let priority = if on { THREAD_PRIORITY_ABOVE_NORMAL } else { THREAD_PRIORITY_NORMAL };
++        // SAFETY: our own thread.
++        unsafe { SetThreadPriority(GetCurrentThread(), priority) };
++        self.applied = Some(on);
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/crates/victory-gpu/src/descriptor.rs b/crates/victory-gpu/src/descriptor.rs
+index 140a0cf..cf0d5e2 100644
+--- a/crates/victory-gpu/src/descriptor.rs
++++ b/crates/victory-gpu/src/descriptor.rs
+@@ -272,6 +272,8 @@ pub(crate) fn begin_sync_heaps() -> SyncedHeaps {
+     STARTED.call_once(|| {
+         let made = std::thread::Builder::new().name("victory-heap-sync".into()).spawn(|| {
+             crate::cores::keep_on_fast_cores("victory-heap-sync");
++            // (The submitting thread waits for its rounds.)
++            let mut priority = crate::cores::Priority::new();
+             let rounds = || SYNC_ROUNDS.0.lock().unwrap_or_else(|e| e.into_inner());
+             /// A round is over, however it ends.
+             struct Over;
+@@ -300,6 +302,7 @@ pub(crate) fn begin_sync_heaps() -> SyncedHeaps {
+                     }
+                 }
+                 drop(r);
++                priority.keep();
+                 let _over = asked.then(|| {
+                     last = std::time::Instant::now();
+                     Over
+@@ -844,15 +847,15 @@ pub(crate) fn with_heap<T>(heap: usize, f: impl FnOnce(&Heap) -> T) -> Option<T>
+ }
+
+ /// Gives back dynamic slots of the host heap behind the title heap at
+-/// `heap`, if that heap still exists.
++/// `heap`, if that host heap instance (`id`) still exists.
+ #[cfg(windows)]
+-pub(crate) fn release_dynamic(heap: usize, first: u32, n: u32) {
++pub(crate) fn release_dynamic(heap: usize, id: u64, first: u32, n: u32) {
+     let heaps = SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner());
+     if heaps.iter().any(|&(_, _, h)| h == heap)
+         // SAFETY: registered heaps are live (removed when dropped).
+         && let Some(Some(host)) = unsafe { &*(heap as *const Heap) }.host.get()
+     {
+-        host.release(first, n);
++        host.release(id, first, n);
+     }
+ }
+
+diff --git a/crates/victory-gpu/src/descriptor/host.rs b/crates/victory-gpu/src/descriptor/host.rs
+index 9045bb0..1de0c29 100644
+--- a/crates/victory-gpu/src/descriptor/host.rs
++++ b/crates/victory-gpu/src/descriptor/host.rs
+@@ -111,7 +111,13 @@ impl Made {
+     }
+ }
+
++static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
++
+ pub(crate) struct HostHeap {
++    /// Identity of this host heap instance, checked by [`release`] so a stale
++    /// list resetting after a title heap was replaced at the same address does
++    /// not free slots belonging to the new heap.
++    id: u64,
+     pub(crate) buffer_sweep: Mutex<crate::draw::BufferSweep>,
+     pub(crate) buffer_frame: std::sync::atomic::AtomicU64,
+     pub(crate) heap: ID3D12DescriptorHeap,
+@@ -1951,6 +1957,7 @@ impl HostHeap {
+             .flatten();
+         let marks = std::sync::Arc::new(QueueMarks::new(if sampler { 0 } else { count as usize }));
+         let h = HostHeap {
++            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+             buffer_sweep: Mutex::default(),
+             buffer_frame: std::sync::atomic::AtomicU64::new(u64::MAX),
+             heap,
+@@ -3320,11 +3327,19 @@ impl HostHeap {
+         }
+     }
+
++    /// Identity of this host heap instance (see [`release`]).
++    pub(crate) fn id(&self) -> u64 {
++        self.id
++    }
++
+     /// Gives back `n` dynamic slots from `first` (an index [`dynamic`]
+-    /// returned).
++    /// returned), only if `id` matches this host heap.
+     ///
+     /// [`dynamic`]: HostHeap::dynamic
+-    pub(crate) fn release(&self, first: u32, n: u32) {
++    pub(crate) fn release(&self, id: u64, first: u32, n: u32) {
++        if id != self.id {
++            return;
++        }
+         let Some(at) = first.checked_sub(self.count) else {
+             return;
+         };
+@@ -6526,11 +6541,29 @@ mod tests {
+         assert_eq!((a, b), (4, 4 + heap.dynamic - 100));
+         // 40 left at the end: 50 do not fit until something is given back.
+         assert_eq!(heap.dynamic(50), None);
+-        heap.release(a, 50);
++        heap.release(heap.id(), a, 50);
+         assert_eq!(heap.dynamic(50), Some(4));
+         assert_eq!(heap.dynamic(40), Some(4 + heap.dynamic - 40));
+     }
+
++    #[test]
++    fn dynamic_slots_are_given_back_only_to_the_heap_that_took_them() {
++        let (Some(a), Some(b)) = (HostHeap::new(false, 4), HostHeap::new(false, 4)) else {
++            return; // no host GPU
++        };
++        assert_ne!(a.id(), b.id());
++        let first = a.dynamic(2).unwrap();
++        let after_alloc = a.free.load(std::sync::atomic::Ordering::Relaxed);
++        a.release(b.id(), first, 2);
++        assert_eq!(
++            a.free.load(std::sync::atomic::Ordering::Relaxed),
++            after_alloc,
++            "releasing with another heap's identity must not free slots"
++        );
++        a.release(a.id(), first, 2);
++        assert_eq!(a.free.load(std::sync::atomic::Ordering::Relaxed), after_alloc + 2);
++    }
++
+     #[test]
+     fn dynamic_search_can_find_a_run_across_the_cursor() {
+         let Some(heap) = HostHeap::new(false, 4) else {
+@@ -6544,17 +6577,17 @@ mod tests {
+         assert_eq!((first, left, right, rest), (4, 5, 7, 9));
+
+         // Reallocating the left half puts the cursor back in the middle.
+-        heap.release(left, 2);
++        heap.release(heap.id(), left, 2);
+         assert_eq!(heap.dynamic(2), Some(left));
+-        heap.release(left, 2);
+-        heap.release(right, 2);
++        heap.release(heap.id(), left, 2);
++        heap.release(heap.id(), right, 2);
+         assert_eq!(heap.dynamic(4), Some(left));
+         assert_eq!(heap.dynamic(1), None);
+
+         // A free slot at each physical end does not form a two-slot range.
+-        heap.release(first, 1);
++        heap.release(heap.id(), first, 1);
+         let last = first + heap.dynamic - 1;
+-        heap.release(last, 1);
++        heap.release(heap.id(), last, 1);
+         assert_eq!(heap.dynamic(2), None);
+     }
+
+diff --git a/crates/victory-gpu/src/draw.rs b/crates/victory-gpu/src/draw.rs
+index c09e693..0d7ea53 100644
+--- a/crates/victory-gpu/src/draw.rs
++++ b/crates/victory-gpu/src/draw.rs
+@@ -543,9 +543,9 @@ pub(crate) struct State {
+     /// Tables made afresh in this list: (table, slot count, contents) → first
+     /// dynamic slot.
+     fresh_tables: std::collections::HashMap<(u64, u32, u64), FreshTable, std::hash::BuildHasherDefault<crate::host::AddressHash>>,
+-    /// The dynamic slots the list holds: title heap, first, count; given
+-    /// back when the list has run, is reset or released.
+-    dynamic: Vec<(usize, u32, u32)>,
++    /// The dynamic slots the list holds: title heap, host heap id, first,
++    /// count; given back when the list has run, is reset or released.
++    dynamic: Vec<(usize, u64, u32, u32)>,
+     /// Root SRVs bound as one-view tables in this list: (title heap, title
+     /// address; 0 for none) → dynamic slot, and the host copy the slot
+     /// shows: later draws of the list bring that one up to date, whatever
+@@ -564,8 +564,8 @@ pub(crate) struct State {
+
+ impl Drop for State {
+     fn drop(&mut self) {
+-        for &(heap, first, n) in &self.dynamic {
+-            crate::descriptor::release_dynamic(heap, first, n);
++        for &(heap, id, first, n) in &self.dynamic {
++            crate::descriptor::release_dynamic(heap, id, first, n);
+         }
+     }
+ }
+@@ -586,8 +586,8 @@ impl State {
+             static ONCE: std::sync::Once = std::sync::Once::new();
+             ONCE.call_once(|| tracing::warn!("a list ran again after its descriptor tables were given back"));
+         }
+-        for (heap, first, n) in self.dynamic.drain(..) {
+-            crate::descriptor::release_dynamic(heap, first, n);
++        for (heap, id, first, n) in self.dynamic.drain(..) {
++            crate::descriptor::release_dynamic(heap, id, first, n);
+         }
+         self.fresh_tables.clear();
+         self.recording = 0;
+@@ -2242,7 +2242,7 @@ impl State {
+                 }) else {
+                     return false;
+                 };
+-                self.dynamic.push((key.0, index, 1));
++                self.dynamic.push((key.0, host.id(), index, 1));
+                 if let Some((a, s)) = &shadow {
+                     // SAFETY: a live buffer.
+                     let base = unsafe { s.buffer.GetGPUVirtualAddress() };
+@@ -2316,7 +2316,7 @@ impl State {
+                 }) else {
+                     return false;
+                 };
+-                self.dynamic.push((key.0, index, 1));
++                self.dynamic.push((key.0, host.id(), index, 1));
+                 self.root_srv_slots
+                     .insert(key, (index, shadow.as_ref().map(|(_, s)| s.clone())));
+                 match &shadow {
+@@ -4565,7 +4565,7 @@ impl State {
+             };
+             self.fresh_tables.insert(key, FreshTable { first, epoch: 0, ready: Vec::new() });
+             self.dynamic
+-                .push((std::ptr::from_ref(heap) as usize, first, n));
++                .push((std::ptr::from_ref(heap) as usize, host.id(), first, n));
+             // The title's own slots of this table: what the draw reads of
+             // them it brings up to date here, in the dynamic slots.
+             let title_first = heap.index(table).filter(|first| first + n <= host.count());
+diff --git a/crates/victory-gpu/src/host.rs b/crates/victory-gpu/src/host.rs
+index b4baed7..44c39e3 100644
+--- a/crates/victory-gpu/src/host.rs
++++ b/crates/victory-gpu/src/host.rs
+@@ -911,7 +911,16 @@ fn create() -> windows::core::Result<Host> {
+             D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device)?;
+             tracing::info!("host device on the software adapter (WARP)");
+         } else {
+-            D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
++            // NULL is the adapter that owns the desktop. On this laptop that is
++            // the Intel iGPU, and the title would run there while the RTX 4050
++            // sits idle. `preferred_adapter` takes the discrete GPU instead.
++            match preferred_adapter() {
++                Ok(adapter) => D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device)?,
++                Err(e) => {
++                    tracing::warn!(error = %e, "no preferred adapter; using the system default");
++                    D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
++                }
++            }
+             // Whether a GPU hang ends the run or freezes the PC (#1054).
+             crate::tdr::log();
+         }
+@@ -1014,6 +1023,84 @@ impl Host {
+     }
+ }
+
++/// How `VICTORY_D3D12_ADAPTER` chooses the device.
++#[derive(Debug, PartialEq, Eq)]
++enum AdapterPick {
++    /// Hardware adapter with the most dedicated video memory.
++    MostMemory,
++    /// `EnumAdapters1` index, software adapters included in the count.
++    Index(u32),
++    /// Case-insensitive part of the adapter name (`NVIDIA`).
++    Name(String),
++}
++
++fn parse_adapter_pick(raw: Option<&str>) -> AdapterPick {
++    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
++        return AdapterPick::MostMemory;
++    };
++    match raw.parse::<u32>() {
++        Ok(index) => AdapterPick::Index(index),
++        Err(_) => AdapterPick::Name(raw.to_lowercase()),
++    }
++}
++
++fn adapter_name(desc: &DXGI_ADAPTER_DESC1) -> String {
++    let len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
++    String::from_utf16_lossy(&desc.Description[..len])
++}
++
++/// The adapter the device is created on.
++///
++/// `VICTORY_D3D12_ADAPTER` picks one: a decimal index, or a case-insensitive
++/// part of the adapter name. Unset, the hardware adapter with the most
++/// dedicated video memory is used, so a laptop whose panel is on the
++/// integrated GPU does not run the title there. Software adapters are skipped
++/// except when an index names one.
++pub(crate) fn preferred_adapter() -> windows::core::Result<IDXGIAdapter1> {
++    // SAFETY: plain DXGI adapter queries.
++    unsafe {
++        let factory: IDXGIFactory4 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))?;
++        let pick = match std::env::var("VICTORY_D3D12_ADAPTER") {
++            Ok(raw) => parse_adapter_pick(Some(&raw)),
++            Err(_) => AdapterPick::MostMemory,
++        };
++        let mut best: Option<(u64, IDXGIAdapter1)> = None;
++        for i in 0..16u32 {
++            let Ok(adapter) = factory.EnumAdapters1(i) else { break };
++            let desc = adapter.GetDesc1()?;
++            let software = desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0;
++            if software && !matches!(pick, AdapterPick::Index(_)) {
++                continue;
++            }
++            let name = adapter_name(&desc);
++            let dedicated = desc.DedicatedVideoMemory as u64;
++            let chosen = match &pick {
++                AdapterPick::Index(n) => i == *n,
++                AdapterPick::Name(part) => name.to_lowercase().contains(part),
++                AdapterPick::MostMemory => best.as_ref().is_none_or(|(mem, _)| dedicated > *mem),
++            };
++            if !chosen {
++                continue;
++            }
++            if !matches!(pick, AdapterPick::MostMemory) {
++                tracing::info!(adapter = %name, dedicated_mb = dedicated >> 20, "host adapter");
++                return Ok(adapter);
++            }
++            best = Some((dedicated, adapter));
++        }
++        let Some((_, adapter)) = best else {
++            return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL));
++        };
++        let desc = adapter.GetDesc1()?;
++        tracing::info!(
++            adapter = %adapter_name(&desc),
++            dedicated_mb = desc.DedicatedVideoMemory >> 20,
++            "host adapter (most dedicated memory)"
++        );
++        Ok(adapter)
++    }
++}
++
+ /// DXGI may return hardware for `EnumWarpAdapter` (notably under Proton).
+ /// Reject it before creating a device in diagnostics' software-only mode.
+ pub(crate) fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
+@@ -1038,6 +1125,18 @@ pub(crate) fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
+
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn adapter_pick_reads_the_switch() {
++        assert_eq!(super::parse_adapter_pick(None), super::AdapterPick::MostMemory);
++        assert_eq!(super::parse_adapter_pick(Some("  ")), super::AdapterPick::MostMemory);
++        assert_eq!(super::parse_adapter_pick(Some("0")), super::AdapterPick::Index(0));
++        assert_eq!(super::parse_adapter_pick(Some("2")), super::AdapterPick::Index(2));
++        assert_eq!(
++            super::parse_adapter_pick(Some("NVIDIA")),
++            super::AdapterPick::Name("nvidia".to_string())
++        );
++    }
++
+     /// A list of ours is found by its name, with the debug layer's note or not.
+     #[cfg(feature = "diagnostics")]
+     #[test]
+@@ -9244,7 +9343,59 @@ struct Presenter {
+ /// line at the top of the picture (`menu.rs`).
+ pub(crate) static METER_FPS_TENTHS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
++/// Opt-in host presentation timings. Flush every second so a failed run
++/// leaves a usable trace without flushing the file on every present.
++struct FrameCapture {
++    csv: std::io::BufWriter<std::fs::File>,
++    start: Option<std::time::Instant>,
++    previous: Option<(std::time::Instant, u64)>,
++    flushed: std::time::Instant,
++}
++
++impl FrameCapture {
++    fn open() -> Option<Self> {
++        use std::io::Write;
++
++        let path = std::env::var_os("VICTORY_FRAME_CSV").filter(|path| !path.is_empty())?;
++        let open = || -> std::io::Result<_> {
++            let file = std::fs::File::create_new(&path)?;
++            let mut csv = std::io::BufWriter::new(file);
++            writeln!(csv, "frame_token,elapsed_us,frame_us,draws")?;
++            csv.flush()?;
++            Ok(Self { csv, start: None, previous: None, flushed: std::time::Instant::now() })
++        };
++        match open() {
++            Ok(capture) => Some(capture),
++            Err(error) => {
++                tracing::warn!(path = ?path, %error, "could not open the frame CSV");
++                None
++            }
++        }
++    }
++
++    fn present(&mut self, frame: u64) -> std::io::Result<()> {
++        use std::io::Write;
++
++        let now = std::time::Instant::now();
++        let drawn = crate::draw::drawn();
++        let start = *self.start.get_or_insert(now);
++        let Some((last, last_drawn)) = self.previous.replace((now, drawn)) else {
++            return Ok(());
++        };
++        let elapsed_us = now.duration_since(start).as_micros();
++        let frame_us = now.duration_since(last).as_micros();
++        let draws = drawn.saturating_sub(last_drawn);
++        writeln!(self.csv, "{frame},{elapsed_us},{frame_us},{draws}")?;
++        if now.duration_since(self.flushed) >= std::time::Duration::from_secs(1) {
++            self.csv.flush()?;
++            self.flushed = now;
++        }
++        Ok(())
++    }
++}
++
+ struct Meter {
++    capture: Option<FrameCapture>,
+     since: std::time::Instant,
+     frames: u32,
+     #[cfg(feature = "diagnostics")]
+@@ -9259,6 +9410,7 @@ impl Meter {
+     fn new() -> Self {
+         let now = std::time::Instant::now();
+         Meter {
++            capture: FrameCapture::open(),
+             since: now,
+             frames: 0,
+             #[cfg(feature = "diagnostics")]
+@@ -10026,8 +10178,15 @@ impl Host {
+                 },
+             );
+             let called = crate::streamline::present_called(&presenting);
+-            let _ = p.swap_chain.Present(0, DXGI_PRESENT(0));
++            let presented = p.swap_chain.Present(0, DXGI_PRESENT(0));
+             crate::streamline::present_returned(called);
++            if presented.0 == 0
++                && let Some(capture) = &mut p.meter.capture
++                && let Err(error) = capture.present(frame)
++            {
++                tracing::warn!(%error, "could not write the frame CSV");
++                p.meter.capture = None;
++            }
+             crate::streamline::present_ends(presenting);
+             showing.next("the frame meter");
+             p.panel.frame(p.meter.line_due());
+diff --git a/crates/victory-gpu/src/host/aside.rs b/crates/victory-gpu/src/host/aside.rs
+index b46cf61..80bf029 100644
+--- a/crates/victory-gpu/src/host/aside.rs
++++ b/crates/victory-gpu/src/host/aside.rs
+@@ -67,7 +67,12 @@ pub(crate) fn begin(work: impl FnOnce() -> Vec<Refresh> + Send + 'static) -> std
+             .name("victory-aside".into())
+             .spawn(move || {
+                 crate::cores::keep_on_fast_cores("victory-aside");
+-                jobs.into_iter().for_each(|job| job())
++                // (The submitting thread waits for its pass at the lists' close.)
++                let mut priority = crate::cores::Priority::new();
++                jobs.into_iter().for_each(|job| {
++                    priority.keep();
++                    job()
++                })
+             })
+             .ok()
+             .map(|_| Mutex::new(send))
+diff --git a/crates/victory-gpu/src/land.rs b/crates/victory-gpu/src/land.rs
+index 2bde585..9b23018 100644
+--- a/crates/victory-gpu/src/land.rs
++++ b/crates/victory-gpu/src/land.rs
+@@ -250,6 +250,8 @@ impl Pool {
+     }
+
+     fn help(&self) {
++        // (The thread that calls `each` waits for this one's share.)
++        let mut priority = crate::cores::Priority::new();
+         let mut state = self.state();
+         loop {
+             let Some((work, i)) = take(&mut state) else {
+@@ -262,6 +264,7 @@ impl Pool {
+             // SAFETY: counted in `running`, so `each` has not returned.
+             let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { (*work.0)(i) }));
+             working.end();
++            priority.keep();
+             state = self.state();
+             state.running -= 1;
+             state.panicked |= ran.is_err();
+diff --git a/crates/victory-gpu/src/port.rs b/crates/victory-gpu/src/port.rs
+index 22edcf3..cfbb13b 100644
+--- a/crates/victory-gpu/src/port.rs
++++ b/crates/victory-gpu/src/port.rs
+@@ -342,6 +342,30 @@ mod tests {
+         if windows::core::Interface::cast::<ID3D12Device13>(&device).is_err() {
+             return;
+         }
++        check_reserved_section(&device);
++    }
++
++    /// Run the same byte checks on the hardware selected by the launcher.
++    #[test]
++    #[ignore = "requires a hardware D3D12 adapter with ID3D12Device13"]
++    fn hardware_reads_and_writes_the_constants_arena_in_place() {
++        use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory2, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_CREATE_FACTORY_FLAGS, IDXGIAdapter1, IDXGIFactory4};
++
++        let _turn = crate::indirect::tests::warp_turn();
++        let device = &crate::host::host().expect("host D3D12 device").device;
++        // SAFETY: read-only adapter queries against the device's actual LUID.
++        let desc = unsafe {
++            let factory: IDXGIFactory4 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).expect("DXGI factory");
++            let adapter: IDXGIAdapter1 = factory.EnumAdapterByLuid(device.GetAdapterLuid()).expect("device's DXGI adapter");
++            adapter.GetDesc1().expect("adapter description")
++        };
++        assert_eq!(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32, 0, "a hardware adapter is required");
++        let name = String::from_utf16_lossy(&desc.Description);
++        eprintln!("Testing the constants arena on {}", name.trim_end_matches('\0'));
++        check_reserved_section(device);
++    }
++
++    fn check_reserved_section(device: &ID3D12Device) {
+         const K: usize = 64 << 10;
+         // SAFETY (the whole test): the section, placeholder and views made
+         // here.
+@@ -371,9 +395,9 @@ mod tests {
+             }
+             let base = hole as u64;
+             let (start, len) = (base + K as u64 + 0x40, 5 * K as u64);
+-            let placed = place_in(&device, start, len).unwrap_or_else(|e| panic!("not placed: {e:?}"));
++            let placed = place_in(device, start, len).unwrap_or_else(|e| panic!("not placed: {e:?}"));
+             assert_eq!(placed.bias, 0x40);
+-            let mut rig = crate::inplace::Rig::new(&device).unwrap();
++            let mut rig = crate::inplace::Rig::new(device).unwrap();
+             for (i, b) in std::slice::from_raw_parts_mut(start as *mut u8, len as usize).iter_mut().enumerate() {
+                 *b = (i * 7 + 3) as u8;
+             }
+@@ -383,7 +407,7 @@ mod tests {
+             assert!(std::slice::from_raw_parts((start + 3 * K as u64) as *const u8, 256).iter().all(|&b| b == 0x5a), "the card's write shows in the title's view");
+             // Another buffer in the same stretch: the same region.
+             let regions = REGIONS.lock().unwrap().len();
+-            let second = place_in(&device, base + 6 * K as u64, 100).unwrap_or_else(|e| panic!("not placed: {e:?}"));
++            let second = place_in(device, base + 6 * K as u64, 100).unwrap_or_else(|e| panic!("not placed: {e:?}"));
+             assert_eq!(REGIONS.lock().unwrap().len(), regions, "one region for the stretch");
+             assert_eq!(second.bias, 0);
+             // The title's views may change under the heap.
+diff --git a/crates/victory-gpu/src/shadow.rs b/crates/victory-gpu/src/shadow.rs
+index 18bdfa2..f161ab8 100644
+--- a/crates/victory-gpu/src/shadow.rs
++++ b/crates/victory-gpu/src/shadow.rs
+@@ -1562,8 +1562,10 @@ fn workers() -> &'static Workers {
+         for i in 0..wide_threads() {
+             let _ = std::thread::Builder::new().name(format!("victory-wide-{i}")).spawn(move || {
+                 crate::cores::keep_helper_on_fast_cores("victory-wide");
++                let mut priority = crate::cores::Priority::new();
+                 let workers = WORKERS.get().expect("made above");
+                 loop {
++                    priority.keep();
+                     let job = {
+                         // A little while awake first: the next work comes
+                         // within microseconds more often than not.
+@@ -4092,7 +4094,11 @@ impl Shadow {
+         // Pages taken before and written since: in the order of their runs.
+         let mut again_at: Vec<(usize, u64)> = Vec::new();
+         let last = (to - 1) / PAGE;
+-        for page in from / PAGE..=last {
++        let mut page = from / PAGE;
++        // A covering range already holds every byte as of its epoch.
++        // A clean gap can be skipped once the preceding run is closed.
++        let skip_clean = ranged != 0 && crate::asked_for!("VICTORY_SPARSE_REFRESH");
++        while page <= last {
+             let write = match writes.peek() {
+                 Some(&&(p, w)) if p == page => {
+                     writes.next();
+@@ -4124,6 +4130,11 @@ impl Shadow {
+             } else if let Some((first, known)) = run.take() {
+                 runs.push(((first * PAGE).max(from), (page * PAGE).min(to), known));
+             }
++            page += 1;
++            if skip_clean && run.is_none() {
++                let Some(&&(next, _)) = writes.peek() else { break };
++                page = page.max(next);
++            }
+         }
+         // Cut to the range: next to it shaders may be writing the copy.
+         if let Some((first, known)) = run {
+diff --git a/crates/victory-gpu/src/streamline.rs b/crates/victory-gpu/src/streamline.rs
+index 5b7a2fc..e5b13e8 100644
+--- a/crates/victory-gpu/src/streamline.rs
++++ b/crates/victory-gpu/src/streamline.rs
+@@ -467,13 +467,13 @@ fn wide(path: &Path) -> Vec<u16> {
+     path.as_os_str().encode_wide().chain([0]).collect()
+ }
+
+-/// The adapter a device made with no adapter named is on (the first), its
+-/// name and LUID.
++/// The adapter the device is created on (the discrete GPU, or
++/// `VICTORY_D3D12_ADAPTER`), its name and LUID. DLSS is checked against this
++/// one, not against whichever adapter happens to own the desktop.
+ fn default_adapter() -> Option<(String, windows::Win32::Foundation::LUID)> {
+     // SAFETY: plain DXGI queries.
+     unsafe {
+-        let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
+-        let adapter = factory.EnumAdapters1(0).ok()?;
++        let adapter = crate::host::preferred_adapter().ok()?;
+         let desc = adapter.GetDesc1().ok()?;
+         let len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
+         Some((String::from_utf16_lossy(&desc.Description[..len]), desc.AdapterLuid))
+diff --git a/crates/victory-hle/src/modules/xmem.rs b/crates/victory-hle/src/modules/xmem.rs
+index 7a2c4a8..d6c321f 100644
+--- a/crates/victory-hle/src/modules/xmem.rs
++++ b/crates/victory-hle/src/modules/xmem.rs
+@@ -394,9 +394,9 @@ pub extern "system" fn XMemIsToolsMemAvailable() -> BOOL {
+ }
+
+ // Physical pages: on the console, 64 KiB frames a title maps into its own
+-// reservations, at more than one address if it likes. Here each allocation
+-// is a pagefile-backed section, its pages are 64 KiB slices of it, and a
+-// mapping is a view of consecutive slices in place of a host placeholder.
++// reservations, at more than one address if it likes. An allocation may
++// span pagefile-backed sections. Each host view maps consecutive 64 KiB
++// slices of one section in place of a host placeholder.
+
+ const PAGE: usize = 64 << 10;
+
+@@ -688,68 +688,110 @@ pub extern "system" fn XMemAllocatePhysicalPages(
+     }
+     // SAFETY: checked non-null.
+     let n = unsafe { *count };
+-    let Some(size) = n.checked_mul(PAGE).filter(|&s| s > 0) else {
++    let Some(bytes) = n.checked_mul(PAGE).filter(|&bytes| bytes > 0) else {
+         return 0;
+     };
+-    // A pagefile-backed section of `size` bytes, its pages committed when
+-    // first mapped or written (`commit`): the title asks for 6.1
+-    // GiB at once, which a busy host often cannot commit (error 1450).
+-    // SAFETY: plain section creation.
+-    let handle = unsafe {
+-        CreateFileMappingW(
+-            INVALID_HANDLE_VALUE,
+-            std::ptr::null(),
+-            // Under Wine a committed section is a sparse file, free until
+-            // touched, and committing a reserved one page by page costs a
+-            // wineserver request each that scans every range committed so
+-            // far: commit it whole there.
+-            PAGE_READWRITE | if on_wine() { SEC_COMMIT } else { SEC_RESERVE },
+-            (size as u64 >> 32) as u32,
+-            size as u32,
+-            std::ptr::null(),
+-        )
+-    };
+-    if handle.is_null() {
+-        let error = std::io::Error::last_os_error();
+-        tracing::warn!(n, %error, "XMemAllocatePhysicalPages failed");
++    let per = allocation_section_pages(bytes);
++    let Some(first) = allocate_physical(n, per) else {
+         // SAFETY: checked non-null.
+         unsafe { count.write(0) };
+         return 0;
+-    }
++    };
+     tracing::debug!(
+         n,
++        sections = n.div_ceil(per),
+         flags = format_args!("{flags:#x}"),
+         "XMemAllocatePhysicalPages"
+     );
+-    // For the GPU side's in-place census: only a committed section can be
+-    // opened as a host heap.
+-    victory_gpu::title_memory_section(handle as usize, size as u64, on_wine());
+-    let section = Arc::new(Section {
+-        handle,
+-        pages: n,
+-        window: std::sync::OnceLock::new(),
+-        committed: (0..n.div_ceil(64)).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
+-    });
+-    let mut table = page_table_mut();
+-    let first = table.next_page;
+-    table.next_page += n * FRAMES;
+-    for index in 0..n {
+-        let slice = Slice {
+-            section: section.clone(),
+-            index,
+-        };
+-        table.pages.insert(first + index * FRAMES, slice);
+-    }
+     // Title memory is touched without our locks: a fault there may wait for
+     // a mapping call, which takes them.
+-    drop(table);
+     for index in 0..n {
+-        // SAFETY: the title passes room for `n` page numbers.
++        // SAFETY: the title passes room for n page numbers.
+         unsafe { pages.add(index).write(first + index * FRAMES) };
+     }
+     1
+ }
+
++/// A limit on backing section size. Zero keeps a single section per
++/// request. With thousands of views, smaller sections shorten the Windows
++/// memory manager's view walk without changing the title's page numbers.
++/// Adapted from Marvisak/VIctory#3177 (KainanP, RyanCase94, CuteBooty).
++fn section_pages() -> usize {
++    static PAGES_PER_SECTION: LazyLock<usize> = LazyLock::new(|| {
++        let mb = std::env::var("VICTORY_SECTION_MB")
++            .ok()
++            .and_then(|value| value.trim().parse().ok())
++            .unwrap_or(0);
++        pages_per_section(mb)
++    });
++    *PAGES_PER_SECTION
++}
++
++fn pages_per_section(mb: usize) -> usize {
++    match mb.saturating_mul(MIB / PAGE) {
++        0 => usize::MAX,
++        pages => pages,
++    }
++}
++
++fn allocation_section_pages(bytes: usize) -> usize {
++    // The constants port opens the entire low graphics reservation as one
++    // heap. The title allocates an equal number of physical bytes after
++    // reserving its addresses, before mapping them into that reservation.
++    if port_on()
++        && LOW_RESERVATIONS.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|&(_, size)| size == bytes)
++    {
++        usize::MAX
++    } else {
++        section_pages()
++    }
++}
++
++/// Creates every section before publishing the allocation to the page table.
++fn allocate_physical(n: usize, per: usize) -> Option<usize> {
++    let wine = on_wine();
++    let mut sections = Vec::new();
++    for start in (0..n).step_by(per) {
++        let pages = (n - start).min(per);
++        let size = pages * PAGE;
++        // SAFETY: plain pagefile-backed section creation. Under Wine a
++        // committed section is sparse, while per-page commits are costly.
++        let handle = unsafe {
++            CreateFileMappingW(
++                INVALID_HANDLE_VALUE,
++                std::ptr::null(),
++                PAGE_READWRITE | if wine { SEC_COMMIT } else { SEC_RESERVE },
++                (size as u64 >> 32) as u32,
++                size as u32,
++                std::ptr::null(),
++            )
++        };
++        if handle.is_null() {
++            let error = std::io::Error::last_os_error();
++            tracing::warn!(n, size, %error, "XMemAllocatePhysicalPages failed");
++            return None;
++        }
++        victory_gpu::title_memory_section(handle as usize, size as u64, wine);
++        sections.push(Arc::new(Section {
++            handle,
++            pages,
++            window: std::sync::OnceLock::new(),
++            committed: (0..pages.div_ceil(64)).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
++        }));
++    }
++
++    let mut table = page_table_mut();
++    let first = table.next_page;
++    table.next_page += n * FRAMES;
++    for (section_index, section) in sections.into_iter().enumerate() {
++        let section_start = first + section_index * per * FRAMES;
++        for index in 0..section.pages {
++            table.pages.insert(section_start + index * FRAMES, Slice { section: section.clone(), index });
++        }
++    }
++    Some(first)
++}
++
+ /// Page numbers count 4 KiB frames, so a 64 KiB page's is a multiple of
+ /// 16: the title keeps them as 21-bit `number >> 4` and rebuilds
+ /// them with `<< 4` (128 GiB of pages at most).
+@@ -926,7 +968,7 @@ impl PageWindow {
+ }
+
+ /// A window on bytes `[offset, offset + len)` of `pages` when they are
+-/// consecutive pages of one allocation (how titles usually hand them out);
++/// consecutive pages of one backing section;
+ /// `None` otherwise (pages of several allocations, out of order, or
+ /// unknown, or a host failure), which `write_physical` then handles or
+ /// reports.
+@@ -3636,6 +3678,191 @@ mod tests {
+         pages
+     }
+
++    fn allocate_in(n: usize, per: usize) -> Vec<usize> {
++        let first = allocate_physical(n, per).expect("physical allocation");
++        (0..n).map(|index| first + index * FRAMES).collect()
++    }
++
++    #[test]
++    fn split_sections_keep_one_contiguous_title_page_range() {
++        let whole = allocate_in(33, pages_per_section(0));
++        let split = allocate_in(33, pages_per_section(2));
++        let lengths = |pages: &[usize]| {
++            runs(pages, 0, pages.len() * PAGE).unwrap().iter().map(|&(_, n)| n).collect::<Vec<_>>()
++        };
++        assert_eq!(lengths(&whole), [33]);
++        assert_eq!(lengths(&split), [32, 1]);
++        assert!(split.windows(2).all(|p| p[1] == p[0] + FRAMES));
++        assert_eq!(XMemFreePhysicalPages(whole.len(), whole.as_ptr()), 1);
++
++        let offset = 32 * PAGE - 1;
++        assert!(page_window(&split, offset, 1).is_some());
++        assert!(page_window(&split, offset, 2).is_none());
++        assert!(write_physical(&split, offset, &[17, 29]));
++
++        let bytes = split.len() * PAGE;
++        let at = XMemVirtualAlloc(std::ptr::null_mut(), bytes, MEM_RESERVE | PAGES_64K, 0, PAGE_READWRITE);
++        assert!(!at.is_null());
++        assert_eq!(XMemMapPhysicalPages(at, split.len(), split.as_ptr()), at);
++        assert_eq!(physical().views.range(at as usize..at as usize + bytes).count(), 2);
++        // SAFETY: both backing sections cover this read-write mapping.
++        unsafe {
++            assert_eq!(at.cast::<u8>().add(offset).read(), 17);
++            assert_eq!(at.cast::<u8>().add(offset + 1).read(), 29);
++            at.cast::<u8>().add(bytes - 1).write(41);
++        }
++        assert_eq!(page_bytes(split[32])[PAGE - 1], 41);
++        assert_eq!(XMemMapPhysicalPages(at, split.len(), std::ptr::null()), at);
++        assert_eq!(query(at).host.State, MEM_RESERVE);
++        assert_eq!(XMemFreePhysicalPages(split.len(), split.as_ptr()), 1);
++    }
++
++    #[test]
++    fn section_limit_preserves_the_low_graphics_heap_for_the_constants_port() {
++        let n = 33;
++        let size = n * PAGE;
++        let at = XMemVirtualAlloc(
++            std::ptr::null_mut(),
++            size,
++            MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
++            GRAPHICS | ADDRESS_32BIT,
++            PAGE_NOACCESS,
++        );
++        assert!(!at.is_null() && (at as usize) < 1 << 32);
++        let pages = allocate(n);
++        let groups = runs(&pages, 0, size).unwrap();
++        assert_eq!(groups.len(), if port_on() { 1 } else { n.div_ceil(section_pages()) });
++        assert_eq!(XMemFreePhysicalPages(n, pages.as_ptr()), 1);
++        // SAFETY: a reservation of this test, never mapped.
++        assert_ne!(unsafe { VirtualFree(at, 0, MEM_RELEASE) }, 0);
++        LOW_RESERVATIONS.lock().unwrap_or_else(|e| e.into_inner()).retain(|&(base, _)| base != at as usize);
++    }
++
++    /// Remapping single pages of a large allocation while other memory is
++    /// made and freed: one section per allocation against 2 MiB sections
++    /// (fxceless/victory-fork#1089). Ignored: it maps 4 GiB and runs for a
++    /// minute. `cargo test --release -p victory-hle --lib physical_remap_bench
++    /// -- --ignored --nocapture`; `VICTORY_SECTION_BENCH=<MiB>,<seconds>,
++    /// <rounds>,<pressure MiB>` changes the defaults `4096,10,3,2048`.
++    #[test]
++    #[ignore = "a memory remap benchmark adapted from upstream PR #3177"]
++    fn physical_remap_bench() {
++        use std::sync::atomic::AtomicBool;
++        use std::time::{Duration, Instant};
++
++        let knobs: Vec<usize> = std::env::var("VICTORY_SECTION_BENCH")
++            .unwrap_or_default()
++            .split(',')
++            .filter_map(|v| v.trim().parse().ok())
++            .collect();
++        let knob = |i: usize, default: usize| knobs.get(i).copied().unwrap_or(default);
++        let (mib, seconds, rounds, pressure) =
++            (knob(0, 4096), knob(1, 10), knob(2, 3), knob(3, 2048));
++        let n = mib * MIB / PAGE;
++        let percentile = |v: &mut Vec<f64>, p: usize| {
++            v.sort_by(f64::total_cmp);
++            v[(v.len() * p / 100).min(v.len() - 1)]
++        };
++        let name = |mb: usize| {
++            if mb == 0 {
++                "one".to_string()
++            } else {
++                format!("{mb} MiB")
++            }
++        };
++        let mut results: Vec<(usize, Vec<[f64; 5]>)> = vec![(0, vec![]), (2, vec![])];
++        for round in 0..rounds {
++            for (mb, rows) in &mut results {
++                let pages = allocate_in(n, pages_per_section(*mb));
++                let at = XMemVirtualAlloc(
++                    std::ptr::null_mut(),
++                    n * PAGE,
++                    MEM_RESERVE | PAGES_64K,
++                    0,
++                    PAGE_READWRITE,
++                );
++                assert!(!at.is_null());
++                let base = at as usize;
++                // A view a page, each page touched, as the title maps its pool.
++                for (k, page) in pages.iter().enumerate() {
++                    let page_at = (base + k * PAGE) as *mut c_void;
++                    assert_eq!(XMemMapPhysicalPages(page_at, 1, page), page_at);
++                    for b in (0..PAGE).step_by(4096) {
++                        // SAFETY: mapped read-write just now.
++                        unsafe { page_at.cast::<u8>().byte_add(b).write(1) };
++                    }
++                }
++                let stop = AtomicBool::new(false);
++                let mut calls = Vec::new();
++                std::thread::scope(|scope| {
++                    // Another user of memory: made, touched and freed again.
++                    scope.spawn(|| {
++                        while pressure > 0 && !stop.load(Ordering::Relaxed) {
++                            let mut block = vec![0u8; pressure * MIB];
++                            for b in block.iter_mut().step_by(4096) {
++                                *b = 1;
++                            }
++                            std::hint::black_box(&block);
++                        }
++                    });
++                    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
++                    let mut next = || {
++                        seed ^= seed << 13;
++                        seed ^= seed >> 7;
++                        seed ^= seed << 17;
++                        seed as usize % n
++                    };
++                    let start = Instant::now();
++                    while start.elapsed() < Duration::from_secs(seconds as u64) {
++                        let (k, page) = (next(), pages[next()]);
++                        let page_at = (base + k * PAGE) as *mut c_void;
++                        let t = Instant::now();
++                        assert_eq!(XMemMapPhysicalPages(page_at, 1, &page), page_at);
++                        calls.push(t.elapsed().as_secs_f64() * 1e6);
++                        // SAFETY: mapped read-write just now.
++                        unsafe { page_at.cast::<u8>().write(2) };
++                    }
++                    stop.store(true, Ordering::Relaxed);
++                });
++                let slow: Vec<f64> = calls.iter().copied().filter(|&us| us >= 1000.0).collect();
++                let row = [
++                    calls.len() as f64 / seconds as f64,
++                    percentile(&mut calls, 50),
++                    percentile(&mut calls, 99),
++                    slow.len() as f64,
++                    slow.iter().sum::<f64>() / 1000.0,
++                ];
++                println!(
++                    "round {round}, sections {}: {:.0} remaps/s, median {:.1} us, p99 {:.1} us, {} of 1 ms or more ({:.0} ms)",
++                    name(*mb),
++                    row[0],
++                    row[1],
++                    row[2],
++                    row[3],
++                    row[4]
++                );
++                rows.push(row);
++                assert_eq!(XMemMapPhysicalPages(at, n, std::ptr::null()), at);
++                assert_eq!(XMemFreePhysicalPages(n, pages.as_ptr()), 1);
++            }
++        }
++        for (mb, rows) in &results {
++            let median = |i: usize| {
++                let mut v: Vec<f64> = rows.iter().map(|r| r[i]).collect();
++                percentile(&mut v, 50)
++            };
++            println!(
++                "median of {rounds} rounds, sections {}: {:.0} remaps/s, median {:.1} us, p99 {:.1} us, {} of 1 ms or more ({:.0} ms)",
++                name(*mb),
++                median(0),
++                median(1),
++                median(2),
++                median(3),
++                median(4)
++            );
++        }
++    }
++
+     /// The bytes of one page, through a view of our own.
+     fn page_bytes(page: usize) -> Vec<u8> {
+         let slice = page_table().pages.get(&page).cloned().expect("known page");
+diff --git a/scripts/play-4050.ps1 b/scripts/play-4050.ps1
+new file mode 100644
+index 0000000..ed7888b
+--- /dev/null
++++ b/scripts/play-4050.ps1
+@@ -0,0 +1,49 @@
++# This PC: i7-14700HX, 16 GB RAM, RTX 4050 Laptop (6 GB), 1920x1200 panel on the
++# Intel iGPU. The stock launcher targets an RTX 4070 SUPER / 5070 with 12 GB
++# and 32 GB of RAM (Series X, 2560x1440, DLSS Quality). Those settings do not
++# fit here.
++#
++#   .\scripts\play-4050.ps1 -Exe 'D:\Games\MyDump\game_scarlett_master.exe'
++#   .\scripts\play-4050.ps1 -Exe ... -FrameGen     2x only, if F3 shows VRAM left over
++#
++# What this pins, and why:
++#   Series S          1280x720 targets. At 1440p the layer keeps 3 GB aside for
++#                     render targets; this card's whole budget is about 5.5 GB.
++#   DLSS performance  the scene is shaded at half of that. Ultra Performance is
++#                     softer still: -More @{VICTORY_DLSS_MODE='ultraperformance'}
++#                     on a call of play-foxhound.ps1, not through this switch.
++#   no frame gen      2x wants about 1.5 GB. Left off unless -FrameGen.
++#   texture line 70%  the stock line fills 90% and then the driver resets.
++#   targets reserve   1024 MB, not the 3072 MB kept for a 1440p frame.
++#   card buffers      1024 MB on the GPU. Lower, and the heavy passes read
++#                     those buffers over the bus (measured at about 3 fps).
++#   adapter NVIDIA    D3D12's default adapter is the Intel GPU that owns the panel.
++#
++# Use -FrameCsv with a new path for per-present timing. Use -More for explicit
++# A/B overrides and keep the same preset and scene when comparing runs.
++param(
++    [Parameter(Mandatory)][string]$Exe,
++    [ValidateSet('diag', 'release')][string]$Build = 'release',
++    [switch]$FrameGen,
++    [string]$FrameCsv,
++    [hashtable]$More = @{}
++)
++$settings = @{
++    VICTORY_D3D12_ADAPTER             = 'NVIDIA'
++    VICTORY_TEXTURE_ROOM_PERCENT      = '70'
++    VICTORY_CARD_ROOM_FOR_TARGETS_MB  = '1024'
++    VICTORY_CARD_BUFFERS_MB           = '1024'
++    VICTORY_HOST_WAVE                 = '32'
++}
++foreach ($key in $More.Keys) {
++    $settings[$key] = $More[$key]
++}
++if ($FrameCsv) {
++    $settings.VICTORY_FRAME_CSV = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($FrameCsv)
++}
++$play = Join-Path $PSScriptRoot 'play-foxhound.ps1'
++if ($FrameGen) {
++    & $play -Exe $Exe -Build $Build -SeriesS -Dlss performance -FrameGen -FrameGenX 2 -More $settings
++} else {
++    & $play -Exe $Exe -Build $Build -SeriesS -Dlss performance -NoFrameGenReady -More $settings
++}
