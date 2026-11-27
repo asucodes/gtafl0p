@@ -140,6 +140,8 @@ With the corrected build and the same copied profile and graphics settings, 134 
 
 With levels on demand enabled, `VICTORY_SPARSE_TEXTURE_READ=1` reads and hashes just the span needed by held mips of a partly mapped texture. The renderer uses the full read for soft views, unreadable prefixes and exact refreshes. The prefix hash includes the held-mip mask in its cache key and is kept separate from the full-texture equality check. The release log reports the number of shortened reads and logical source bytes skipped. The RTX 4050 hardware fixture passed with the switch off and with it on in both upload submission modes.
 
+One Series S boot with the switch enabled closed normally after the timed window. The renderer reported 958 active tiled textures at its peak and zero shortened texture reads. There were only six presents with at least 1,000 draws during that window. The capture establishes that this option did not reduce source reads in that boot. Keep it off by default. [Opening capture](diagnostics/rtx4050-2026-11-27-sparse-mip-read.tsv.txt)
+
 ## Credits and license
 
 **Marvisak and the VIctory contributors** built the loader, runtime, Direct3D 12 renderer and shader translator that make this work possible. **fxceless and the victory-fork contributors** maintain the parent of this repository. **trustno1-coder and the VIctory-NVIDIA contributors** built the NVIDIA line tested here. Individual backports are credited above. [VIctory](https://github.com/Marvisak/VIctory) · [victory-fork](https://github.com/fxceless/victory-fork) · [VIctory-NVIDIA](https://github.com/trustno1-coder/VIctory-NVIDIA)

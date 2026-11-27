@@ -1,0 +1,9 @@
+# First 120 seconds from the first host present with at least 1000 draws.
+# Shortened sparse texture reads, Series S, copied benchmark profile.
+offset_us	frame_us	draws
+0	8642644	1590
+96441817	34677705	2658
+100593066	4151249	3426
+107532214	6939147	1131
+112299394	4767180	4063
+114217434	1918039	2698
