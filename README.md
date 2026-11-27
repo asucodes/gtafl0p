@@ -160,6 +160,10 @@ The upload paths keep the descriptor generation they selected. A deferred comple
 
 For a controlled test, add VICTORY_AMBIENT_LINEAR_REFLECTION_DEPTH=1 using the launcher's -More argument. The renderer accepts the traced opaque shader's same-size R32_FLOAT depth input and reconstructs positions from linear depth. Six ambient tests passed on the RTX 4050. The live run logged 210 reflection fallback dispatches across 11 reported intervals, compared with 3 across 11 intervals in the preceding run. It captured all three frames and exited normally. Its later 79-present window measured 90.7 ms median and 579.8 ms p95. The captures still show exposure artifacts. Differences in camera and scene timing prevent a visual comparison, so this path remains opt-in.
 
+### Submission worker isolation
+
+We tested an alternate scheduler that finishes indexed copy batches without running unrelated jobs. The two regression tests and five copy correctness tests passed. In four synthetic trials run baseline, candidate, candidate, baseline, mean refresh time was 29.61, 29.61, 29.20, and 30.71 ms per frame. The prologue smoke test captured all three frames and exited normally. Its later heavy window measured 94.6 ms median and 575.3 ms p95. The earlier run measured 90.7 ms median and 579.8 ms p95 over the corresponding window. The largest reported lock-wait summary was smaller and the middle frame-time window was worse. Because the scene states varied and a sustained benefit was unverified, we removed the experiment.
+
 ## Current VIctory-NVIDIA comparison
 
 PortWatch recorded VIctory-NVIDIA at #2 with a 90% progress score and 20 rendered FPS in its test. The fork reports mostly 26–30 rendered FPS in the opening on an RTX 5070 12 GB with 64 GB RAM. [PortWatch entry](https://github.com/4lwayz/portwatch-vi/blob/main/data/tracker.json) · [Pinned VIctory-NVIDIA source](https://github.com/trustno1-coder/VIctory-NVIDIA/tree/d12eb1b23da4cad2f551a3dd49e82a87e564122a)
