@@ -35,6 +35,12 @@ These are startup samples with the same 120-second, 1,000-draw selection and nea
 
 Set `VICTORY_WINDOW_LAYOUT=1` to sample how live loose GPU buffers map onto memory sections. For windows above 4 GiB that cover aligned contiguous section bytes, the release reports both total window bytes and unique backing bytes. It also reports windows crossing gaps or scattered pages, windows with no mapped view at their first byte, and the time each sample takes. Samples start at 64 windows and are spaced at least 30 seconds apart. These are logical ranges. Windows decides which pages are physically resident.
 
+### Opening stability on the RTX 4050
+
+The capture reached the prison interior with rendered character hair, clothing and lighting. The player reported moving around at about 10 FPS. The test recorded 10,540 host presents with at least 1,000 draws over 13 minutes 37 seconds, then suspended through the Windows close path and exited with code 0. The median was 60.9 ms and p95 was 101.8 ms. In the first two minutes of heavy rendering those figures were 1,273.2 ms and 7,704.4 ms. The run measured an opening scene and did not verify a full mission. [Host present samples](diagnostics/rtx4050-2026-11-27-opening-stability.tsv.txt)
+
+Across 27 memory samples, no whole loose window covered one contiguous memory section. The peak measured loose span was 3,288 MiB, and the system reported as little as 14 MiB of available physical RAM. This ruled out reusing the existing direct constants placement for these whole windows. [Section layout samples](diagnostics/rtx4050-2026-11-27-section-layout.tsv.txt)
+
 ## Submission memory planner
 
 The release includes an opt-in replacement for collecting dirty-page information at submission time. Set `VICTORY_WATCH_BATCH=1` with `VICTORY_ASK_ONCE=1` to group queries inside a Windows allocation. Rejected combined queries fall back to their original subranges, and mapped views still use the existing guard path. Only a successful kernel query publishes coverage. Both modes use the indexed coverage lookup.
