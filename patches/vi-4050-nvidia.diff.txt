@@ -1,11 +1,11 @@
 diff --git a/crates/victory-gpu/src/cores.rs b/crates/victory-gpu/src/cores.rs
-index 0e1ad30..f6a797f 100644
+index 0e1ad30c78169f4cea63fe1f15944e83e834600e..f6a797fc36c5f11c9d5e756fdecfe04e5d50d934 100644
 --- a/crates/victory-gpu/src/cores.rs
 +++ b/crates/victory-gpu/src/cores.rs
 @@ -111,6 +111,54 @@ fn ask(what: &str, from: u32) {
      }
  }
-
+ 
 +/// Whether the threads the submitting thread waits for run at its priority
 +/// (`VICTORY_HELPER_PRIORITY`, on with `1`; `VICTORY_AB` can flip it while
 +/// the title runs): above normal, ahead of the title's threads and of the
@@ -58,7 +58,7 @@ index 0e1ad30..f6a797f 100644
  mod tests {
      use super::*;
 diff --git a/crates/victory-gpu/src/descriptor.rs b/crates/victory-gpu/src/descriptor.rs
-index 140a0cf..cf0d5e2 100644
+index 140a0cfe3985743c6612e4c95db5b66509d50517..cf0d5e2a9772ff3ff9dd747986271ddc3794ba97 100644
 --- a/crates/victory-gpu/src/descriptor.rs
 +++ b/crates/victory-gpu/src/descriptor.rs
 @@ -272,6 +272,8 @@ pub(crate) fn begin_sync_heaps() -> SyncedHeaps {
@@ -80,7 +80,7 @@ index 140a0cf..cf0d5e2 100644
                      Over
 @@ -844,15 +847,15 @@ pub(crate) fn with_heap<T>(heap: usize, f: impl FnOnce(&Heap) -> T) -> Option<T>
  }
-
+ 
  /// Gives back dynamic slots of the host heap behind the title heap at
 -/// `heap`, if that heap still exists.
 +/// `heap`, if that host heap instance (`id`) still exists.
@@ -96,15 +96,15 @@ index 140a0cf..cf0d5e2 100644
 +        host.release(id, first, n);
      }
  }
-
+ 
 diff --git a/crates/victory-gpu/src/descriptor/host.rs b/crates/victory-gpu/src/descriptor/host.rs
-index 9045bb0..1de0c29 100644
+index 9045bb047066ccc30702080c16096a97dd0567ab..1de0c29c0f5475c81a7bf0948751b49a6f6e6ca8 100644
 --- a/crates/victory-gpu/src/descriptor/host.rs
 +++ b/crates/victory-gpu/src/descriptor/host.rs
 @@ -111,7 +111,13 @@ impl Made {
      }
  }
-
+ 
 +static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 +
  pub(crate) struct HostHeap {
@@ -126,7 +126,7 @@ index 9045bb0..1de0c29 100644
 @@ -3320,11 +3327,19 @@ impl HostHeap {
          }
      }
-
+ 
 +    /// Identity of this host heap instance (see [`release`]).
 +    pub(crate) fn id(&self) -> u64 {
 +        self.id
@@ -154,7 +154,7 @@ index 9045bb0..1de0c29 100644
          assert_eq!(heap.dynamic(50), Some(4));
          assert_eq!(heap.dynamic(40), Some(4 + heap.dynamic - 40));
      }
-
+ 
 +    #[test]
 +    fn dynamic_slots_are_given_back_only_to_the_heap_that_took_them() {
 +        let (Some(a), Some(b)) = (HostHeap::new(false, 4), HostHeap::new(false, 4)) else {
@@ -178,7 +178,7 @@ index 9045bb0..1de0c29 100644
          let Some(heap) = HostHeap::new(false, 4) else {
 @@ -6544,17 +6577,17 @@ mod tests {
          assert_eq!((first, left, right, rest), (4, 5, 7, 9));
-
+ 
          // Reallocating the left half puts the cursor back in the middle.
 -        heap.release(left, 2);
 +        heap.release(heap.id(), left, 2);
@@ -189,7 +189,7 @@ index 9045bb0..1de0c29 100644
 +        heap.release(heap.id(), right, 2);
          assert_eq!(heap.dynamic(4), Some(left));
          assert_eq!(heap.dynamic(1), None);
-
+ 
          // A free slot at each physical end does not form a two-slot range.
 -        heap.release(first, 1);
 +        heap.release(heap.id(), first, 1);
@@ -198,9 +198,9 @@ index 9045bb0..1de0c29 100644
 +        heap.release(heap.id(), last, 1);
          assert_eq!(heap.dynamic(2), None);
      }
-
+ 
 diff --git a/crates/victory-gpu/src/draw.rs b/crates/victory-gpu/src/draw.rs
-index c09e693..0d7ea53 100644
+index c09e6930f2a53d36df86f2ae9d046c91cd2688c9..0d7ea537e656d3e0c5e71b1831df0f96ebc2eb41 100644
 --- a/crates/victory-gpu/src/draw.rs
 +++ b/crates/victory-gpu/src/draw.rs
 @@ -543,9 +543,9 @@ pub(crate) struct State {
@@ -217,7 +217,7 @@ index c09e693..0d7ea53 100644
      /// address; 0 for none) → dynamic slot, and the host copy the slot
      /// shows: later draws of the list bring that one up to date, whatever
 @@ -564,8 +564,8 @@ pub(crate) struct State {
-
+ 
  impl Drop for State {
      fn drop(&mut self) {
 -        for &(heap, first, n) in &self.dynamic {
@@ -266,7 +266,7 @@ index c09e693..0d7ea53 100644
              // them it brings up to date here, in the dynamic slots.
              let title_first = heap.index(table).filter(|first| first + n <= host.count());
 diff --git a/crates/victory-gpu/src/host.rs b/crates/victory-gpu/src/host.rs
-index b4baed7..44c39e3 100644
+index b4baed734b22cb888ce2fe6234fec12acc4baa8b..a9b8a1673e6b8a4826b72781e4e34d42c17dc890 100644
 --- a/crates/victory-gpu/src/host.rs
 +++ b/crates/victory-gpu/src/host.rs
 @@ -911,7 +911,16 @@ fn create() -> windows::core::Result<Host> {
@@ -290,7 +290,7 @@ index b4baed7..44c39e3 100644
 @@ -1014,6 +1023,84 @@ impl Host {
      }
  }
-
+ 
 +/// How `VICTORY_D3D12_ADAPTER` chooses the device.
 +#[derive(Debug, PartialEq, Eq)]
 +enum AdapterPick {
@@ -373,7 +373,7 @@ index b4baed7..44c39e3 100644
  /// Reject it before creating a device in diagnostics' software-only mode.
  pub(crate) fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
 @@ -1038,6 +1125,18 @@ pub(crate) fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
-
+ 
  #[cfg(test)]
  mod tests {
 +    #[test]
@@ -394,7 +394,7 @@ index b4baed7..44c39e3 100644
 @@ -9244,7 +9343,59 @@ struct Presenter {
  /// line at the top of the picture (`menu.rs`).
  pub(crate) static METER_FPS_TENTHS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
+ 
 +/// Opt-in host presentation timings. Flush every second so a failed run
 +/// leaves a usable trace without flushing the file on every present.
 +struct FrameCapture {
@@ -459,7 +459,15 @@ index b4baed7..44c39e3 100644
              since: now,
              frames: 0,
              #[cfg(feature = "diagnostics")]
-@@ -10026,8 +10178,15 @@ impl Host {
+@@ -9403,6 +9555,7 @@ impl Meter {
+         let drops = crate::pipeline::take_drops();
+         if self.logged.elapsed() >= std::time::Duration::from_secs(5) {
+             self.logged = std::time::Instant::now();
++            crate::shadow::memory_line();
+             tracing::info!(
+                 "placed texture views: {} writes of another view of the texture a slot showed (it kept the old view until the new was made)",
+                 crate::descriptor::host::KEPT_VIEWS.load(Ordering::Relaxed)
+@@ -10026,8 +10179,15 @@ impl Host {
                  },
              );
              let called = crate::streamline::present_called(&presenting);
@@ -477,7 +485,7 @@ index b4baed7..44c39e3 100644
              showing.next("the frame meter");
              p.panel.frame(p.meter.line_due());
 diff --git a/crates/victory-gpu/src/host/aside.rs b/crates/victory-gpu/src/host/aside.rs
-index b46cf61..80bf029 100644
+index b46cf61aaa2027387dea128752a620fe82941038..80bf02979858c0b7756c2b1fc17551377a65ea55 100644
 --- a/crates/victory-gpu/src/host/aside.rs
 +++ b/crates/victory-gpu/src/host/aside.rs
 @@ -67,7 +67,12 @@ pub(crate) fn begin(work: impl FnOnce() -> Vec<Refresh> + Send + 'static) -> std
@@ -495,12 +503,12 @@ index b46cf61..80bf029 100644
              .ok()
              .map(|_| Mutex::new(send))
 diff --git a/crates/victory-gpu/src/land.rs b/crates/victory-gpu/src/land.rs
-index 2bde585..9b23018 100644
+index 2bde5853fbe11baf40f1348bc8aa896d28e219d0..9b230182506a198375e51bc60372aef3913e81a2 100644
 --- a/crates/victory-gpu/src/land.rs
 +++ b/crates/victory-gpu/src/land.rs
 @@ -250,6 +250,8 @@ impl Pool {
      }
-
+ 
      fn help(&self) {
 +        // (The thread that calls `each` waits for this one's share.)
 +        let mut priority = crate::cores::Priority::new();
@@ -516,7 +524,7 @@ index 2bde585..9b23018 100644
              state.running -= 1;
              state.panicked |= ran.is_err();
 diff --git a/crates/victory-gpu/src/port.rs b/crates/victory-gpu/src/port.rs
-index 22edcf3..cfbb13b 100644
+index 22edcf3d9a7e95cf641ffaf74e3e2007a86da113..cfbb13b206f1f5aaea0e4dcd24f929ccda00fc51 100644
 --- a/crates/victory-gpu/src/port.rs
 +++ b/crates/victory-gpu/src/port.rs
 @@ -342,6 +342,30 @@ mod tests {
@@ -572,7 +580,7 @@ index 22edcf3..cfbb13b 100644
              assert_eq!(second.bias, 0);
              // The title's views may change under the heap.
 diff --git a/crates/victory-gpu/src/shadow.rs b/crates/victory-gpu/src/shadow.rs
-index 18bdfa2..f161ab8 100644
+index 18bdfa29456f3491d3ea460f0431a9ac3ce8bd84..dd8acc39b5b7f9ee071985552706178472e4e8a9 100644
 --- a/crates/victory-gpu/src/shadow.rs
 +++ b/crates/victory-gpu/src/shadow.rs
 @@ -1562,8 +1562,10 @@ fn workers() -> &'static Workers {
@@ -586,7 +594,45 @@ index 18bdfa2..f161ab8 100644
                      let job = {
                          // A little while awake first: the next work comes
                          // within microseconds more often than not.
-@@ -4092,7 +4094,11 @@ impl Shadow {
+@@ -3048,10 +3050,9 @@ pub(crate) fn let_go_idle() {
+ /// For the memory line: host copies alive and their bytes, of them the
+ /// windows of memory outside buffers and their bytes, and the snapshot
+ /// buffers kept for reuse and the bytes they reserve.
+-#[cfg(feature = "diagnostics")]
+ pub(crate) fn memory() -> [u64; 6] {
+     let (windows, window_bytes) = {
+-        let loose = LOOSE.write().unwrap_or_else(|e| e.into_inner());
++        let loose = LOOSE.read().unwrap_or_else(|e| e.into_inner());
+         // Each copy once: a window may stand under several keys.
+         let mut seen = std::collections::HashSet::new();
+         let bytes: u64 = loose
+@@ -3075,6 +3076,25 @@ pub(crate) fn memory() -> [u64; 6] {
+     ]
+ }
+ 
++/// Reports logical mirror sizes in release builds for allocator comparisons.
++pub(crate) fn memory_line() {
++    if !crate::asked_for!("VICTORY_SHADOW_CENSUS") {
++        return;
++    }
++    let [mirrors, mirror_bytes, windows, window_bytes, snapshots, snapshot_bytes] = memory();
++    tracing::info!(
++        mirrors,
++        mirror_span_mib = mirror_bytes >> 20,
++        loose_windows = windows,
++        loose_window_span_mib = window_bytes >> 20,
++        idle_snapshots = snapshots,
++        idle_snapshot_mib = snapshot_bytes >> 20,
++        texture_staging_mib = crate::texture::live_staging_bytes() >> 20,
++        grid_kib = window() >> 10,
++        "shadow memory census"
++    );
++}
++
+ // SAFETY: D3D12 resources are free-threaded; `data` is a persistent mapping
+ // written only on the submitting thread.
+ unsafe impl Send for Shadow {}
+@@ -4092,7 +4112,11 @@ impl Shadow {
          // Pages taken before and written since: in the order of their runs.
          let mut again_at: Vec<(usize, u64)> = Vec::new();
          let last = (to - 1) / PAGE;
@@ -599,7 +645,7 @@ index 18bdfa2..f161ab8 100644
              let write = match writes.peek() {
                  Some(&&(p, w)) if p == page => {
                      writes.next();
-@@ -4124,6 +4130,11 @@ impl Shadow {
+@@ -4124,6 +4148,11 @@ impl Shadow {
              } else if let Some((first, known)) = run.take() {
                  runs.push(((first * PAGE).max(from), (page * PAGE).min(to), known));
              }
@@ -611,14 +657,61 @@ index 18bdfa2..f161ab8 100644
          }
          // Cut to the range: next to it shaders may be writing the copy.
          if let Some((first, known)) = run {
+@@ -5528,27 +5557,31 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
+             shadow.unsized_asks.fetch_add(1, Ordering::Relaxed);
+         }
+     };
+-    // The window is there already (nearly always): readers share the lock.
+-    if !(unsized_ask && tails()) && !(any && fine() && !unsized_ask) {
++    let prefer_tail = unsized_ask && tails();
++    let prefer_cover = any && !unsized_ask && fine();
++    let choose = |map: &BTreeMap<(u64, u64), Arc<Shadow>>| {
++        // A covering window must start in the ask's cell at or below the
++        // ask. This is the same selection for a hit and after a miss.
++        let there = || map.range((cell, 0)..=(address, u64::MAX)).map(|(key, _)| *key);
++        if prefer_tail {
++            longest_tail(there(), address, end).unwrap_or_else(|| tail_of(address, end))
++        } else if prefer_cover {
++            holder(there(), address, end).unwrap_or(named)
++        } else {
++            named
++        }
++    };
++    {
+         let map = LOOSE.read().unwrap_or_else(|e| e.into_inner());
+-        if let Some(shadow) = map.get(&named) {
++        if let Some(shadow) = map.get(&choose(&map)) {
+             note(shadow);
+             return Some(shadow.clone());
+         }
+     }
++    // Another thread may have filled the miss or installed a covering
++    // window since the read lock was released.
+     let mut map = LOOSE.write().unwrap_or_else(|e| e.into_inner());
+-    let (start, len) = if unsized_ask && tails() {
+-        let there = map.range((cell, 0)..=(address, u64::MAX)).map(|(key, _)| *key);
+-        longest_tail(there, address, end).unwrap_or_else(|| tail_of(address, end))
+-    } else if any && fine() && !unsized_ask {
+-        // The windows that begin in the ask's cell at or below the ask (one
+-        // that begins in a cell below and reaches this far is passed over:
+-        // the ask then makes its own).
+-        let there = map.range((cell, 0)..=(address, u64::MAX)).map(|(key, _)| *key);
+-        holder(there, address, end).unwrap_or(named)
+-    } else {
+-        named
+-    };
++    let (start, len) = choose(&map);
+     if let Some(shadow) = map.get(&(start, len)) {
+         note(shadow);
+         return Some(shadow.clone());
 diff --git a/crates/victory-gpu/src/streamline.rs b/crates/victory-gpu/src/streamline.rs
-index 5b7a2fc..e5b13e8 100644
+index 5b7a2fcf7a6b6f50306400571f91f76390a6d0fd..e5b13e89473d99fc3708757dc75d427575a1e8ab 100644
 --- a/crates/victory-gpu/src/streamline.rs
 +++ b/crates/victory-gpu/src/streamline.rs
 @@ -467,13 +467,13 @@ fn wide(path: &Path) -> Vec<u16> {
      path.as_os_str().encode_wide().chain([0]).collect()
  }
-
+ 
 -/// The adapter a device made with no adapter named is on (the first), its
 -/// name and LUID.
 +/// The adapter the device is created on (the discrete GPU, or
@@ -633,13 +726,102 @@ index 5b7a2fc..e5b13e8 100644
          let desc = adapter.GetDesc1().ok()?;
          let len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
          Some((String::from_utf16_lossy(&desc.Description[..len]), desc.AdapterLuid))
+diff --git a/crates/victory-hle/src/modules/lifecycle.rs b/crates/victory-hle/src/modules/lifecycle.rs
+index 09c6baa69c86654b0536f6adebfbd14ecd705e1a..8c8a5d288385d593f7a7313c24bb8e1e5a282af8 100644
+--- a/crates/victory-hle/src/modules/lifecycle.rs
++++ b/crates/victory-hle/src/modules/lifecycle.rs
+@@ -246,9 +246,15 @@ extern "system" fn window_proc(
+     wparam: WPARAM,
+     lparam: LPARAM,
+ ) -> LRESULT {
+-    // A user close (close button, Alt+F4, window or taskbar menu); a
+-    // console title never sees one, nor a WM_CLOSE from it.
+-    if message == wm::WM_SYSCOMMAND && wparam & 0xFFF0 == wm::SC_CLOSE as usize {
++    let system_close = message == wm::WM_SYSCOMMAND && wparam & 0xFFF0 == wm::SC_CLOSE as usize;
++    // Windows can send WM_CLOSE straight to the game's main window. Forward
++    // direct closes of hidden, child or owned windows to the title as before.
++    // SAFETY: hwnd is the window receiving this message.
++    let main_window_close = message == wm::WM_CLOSE
++        && unsafe {
++            wm::IsWindowVisible(hwnd) != 0 && wm::GetAncestor(hwnd, wm::GA_ROOTOWNER) == hwnd
++        };
++    if system_close || main_window_close {
+         end_title("window closed", Box::new(|| {}));
+         return 0;
+     }
+@@ -560,6 +566,65 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn direct_main_window_close_ends_the_process() {
++        const CHILD: &str = "VICTORY_TEST_DIRECT_CLOSE_CHILD";
++        if std::env::var_os(CHILD).is_none() {
++            let name = format!(
++                "{}::direct_main_window_close_ends_the_process",
++                module_path!()
++            )
++            .split_once("::")
++            .unwrap()
++            .1
++            .to_owned();
++            let result = std::process::Command::new(std::env::current_exe().unwrap())
++                .env(CHILD, "1")
++                .args(["--exact", &name, "--nocapture"])
++                .output()
++                .unwrap();
++            let stdout = String::from_utf8_lossy(&result.stdout);
++            let stderr = String::from_utf8_lossy(&result.stderr);
++            assert!(
++                result.status.success() && stdout.contains("sending direct WM_CLOSE"),
++                "{stdout}{stderr}"
++            );
++            return;
++        }
++
++        let null = std::ptr::null_mut();
++        let make_window = |visibility| {
++            CreateWindowExW(
++                wm::WS_EX_NOACTIVATE,
++                w!("STATIC"),
++                w!("test close"),
++                wm::WS_POPUP | visibility,
++                -32_000,
++                -32_000,
++                10,
++                10,
++                null,
++                null,
++                null,
++                std::ptr::null(),
++            )
++        };
++        let auxiliary = make_window(0);
++        assert!(!auxiliary.is_null());
++        // SAFETY: the test owns these windows and sends messages on their thread.
++        unsafe {
++            wm::SendMessageW(auxiliary, wm::WM_CLOSE, 0, 0);
++            assert_eq!(wm::IsWindow(auxiliary), 0);
++            let main = make_window(wm::WS_VISIBLE);
++            assert!(!main.is_null());
++            assert_ne!(wm::IsWindowVisible(main), 0);
++            println!("sending direct WM_CLOSE");
++            wm::SendMessageW(main, wm::WM_CLOSE, 0, 0);
++        }
++        std::thread::sleep(SUSPEND_DEADLINE + Duration::from_secs(2));
++        panic!("closing the main window left VIctory running");
++    }
++
+     thread_local! {
+         /// The system commands `recording` received, low four bits cleared.
+         static COMMANDS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
 diff --git a/crates/victory-hle/src/modules/xmem.rs b/crates/victory-hle/src/modules/xmem.rs
-index 7a2c4a8..d6c321f 100644
+index 7a2c4a82cf4176e432696afd0307b7bf2c41fb3e..d6c321fd00d8e00f7bbb8dc8d451580be2da0fa8 100644
 --- a/crates/victory-hle/src/modules/xmem.rs
 +++ b/crates/victory-hle/src/modules/xmem.rs
 @@ -394,9 +394,9 @@ pub extern "system" fn XMemIsToolsMemAvailable() -> BOOL {
  }
-
+ 
  // Physical pages: on the console, 64 KiB frames a title maps into its own
 -// reservations, at more than one address if it likes. Here each allocation
 -// is a pagefile-backed section, its pages are 64 KiB slices of it, and a
@@ -647,9 +829,9 @@ index 7a2c4a8..d6c321f 100644
 +// reservations, at more than one address if it likes. An allocation may
 +// span pagefile-backed sections. Each host view maps consecutive 64 KiB
 +// slices of one section in place of a host placeholder.
-
+ 
  const PAGE: usize = 64 << 10;
-
+ 
 @@ -688,68 +688,110 @@ pub extern "system" fn XMemAllocatePhysicalPages(
      }
      // SAFETY: checked non-null.
@@ -721,7 +903,7 @@ index 7a2c4a8..d6c321f 100644
      }
      1
  }
-
+ 
 +/// A limit on backing section size. Zero keeps a single section per
 +/// request. With thousands of views, smaller sections shorten the Windows
 +/// memory manager's view walk without changing the title's page numbers.
@@ -807,7 +989,7 @@ index 7a2c4a8..d6c321f 100644
  /// them with `<< 4` (128 GiB of pages at most).
 @@ -926,7 +968,7 @@ impl PageWindow {
  }
-
+ 
  /// A window on bytes `[offset, offset + len)` of `pages` when they are
 -/// consecutive pages of one allocation (how titles usually hand them out);
 +/// consecutive pages of one backing section;
@@ -817,7 +999,7 @@ index 7a2c4a8..d6c321f 100644
 @@ -3636,6 +3678,191 @@ mod tests {
          pages
      }
-
+ 
 +    fn allocate_in(n: usize, per: usize) -> Vec<usize> {
 +        let first = allocate_physical(n, per).expect("physical allocation");
 +        (0..n).map(|index| first + index * FRAMES).collect()
@@ -1008,7 +1190,7 @@ index 7a2c4a8..d6c321f 100644
          let slice = page_table().pages.get(&page).cloned().expect("known page");
 diff --git a/scripts/play-4050.ps1 b/scripts/play-4050.ps1
 new file mode 100644
-index 0000000..ed7888b
+index 0000000000000000000000000000000000000000..ed7888b95690bfeb18b369cda5f7b86e73772069
 --- /dev/null
 +++ b/scripts/play-4050.ps1
 @@ -0,0 +1,49 @@
