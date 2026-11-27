@@ -99,7 +99,7 @@ $experiment = @{
 .\scripts\play-4050.ps1 -Exe 'C:\Path\To\Your\Title.exe' -FrameCsv '.\presents.csv' -More $experiment
 ~~~
 
-Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `f1a672714bb7c6cbf0c67c988ce38d744fcbb754`.
+Change `VICTORY_SECTION_MB` to `0` for the single-section comparison. The release binary SHA-256 for the allocator comparison was `3751d5e0b76ffb445e0f69b1f5dbab5defb8e82ba6d3d4672320b7b2190a8b05`. The published diff was replayed against the pinned base and produced source tree `05fbd538f47477654e7ebea13a373aa6700b6807`.
 
 ## Shader output and pipeline failures
 
@@ -114,6 +114,12 @@ Set `VICTORY_WRITE_EPOCH_INDEX=1` to try a coarse write-epoch bound on already m
 Set `VICTORY_TEXTURE_DROP_MIPS=1` to omit the largest mip when creating eligible sampled textures on the host. Render targets, depth and storage textures retain their full size. Descriptors and copy operations account for the new first mip. The descriptor-range regression and two D3D12 readback tests passed. Readback was tested with the option off and on, and the Windows release built successfully. The option remains off by default while in-game image quality and frame time are measured. [Upstream change](https://github.com/miaohaixiang1-netizen/cool-fox-12gb/commit/fcb4f71bbb90de568db5a98aadee1a635e90e6f9)
 
 The previous RTX 4050 run ended in a Direct3D device reset. Its final reported interval was 4,785 ms, including 4,197 ms of CPU preparation. The texture-admission accounting was 4,266 MiB against a 3,606 MiB threshold. The release log could not identify the triggering GPU command. This experiment addresses texture pressure. Its effect on the crash and black skin is still open.
+
+## CGBJ comparison on the RTX 4050
+
+AmericasLauncher selects DoubleGhosty/cool_fox for its NVIDIA CGBJ runner. We built revision `42b95b9` and used that runner's NVIDIA preset with Series X, an isolated save and a cold cache. Local instrumentation selected the RTX 4050 and wrote the same timing CSV. The startup screen presented at about 30 FPS with 13 draws. The scripted run exited with a null-write access violation at the 3D transition before any presents reached 1,000 draws. This run provides startup evidence. [AmericasLauncher runner definitions](https://github.com/isaac-btw/AmericasLauncher/blob/v1.7.5/src/AmericasLauncher/Data/runners.json) · [CGBJ configuration](https://github.com/DoubleGhosty/cool_fox/blob/main/Play-VIctory.cmd)
+
+Set `VICTORY_LIBRARY_STORE_LATER=1` to let a completed pipeline reach draw callers while its entry waits for the host pipeline library to finish saving. The queue holds at most 64 waiting pipeline states, and workers use the synchronous store when the queue fills. All seven pipeline-library tests passed. Gameplay timing and the effect on missing draws remain under evaluation. [CGBJ pipeline-library design](https://github.com/DoubleGhosty/cool_fox/blob/main/crates/victory-gpu/src/pipeline/library.rs)
 
 ## Credits and license
 

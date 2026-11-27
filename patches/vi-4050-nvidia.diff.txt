@@ -1113,6 +1113,128 @@ index c462b0e25c5de702930d90092cde3e88ecf5d5af..0681802de85bbf42a2051f1646f944b4
  /// Draws and dispatches dropped since the last [`take_drops`], by reason
  /// (diagnostics).
  #[cfg(all(windows, feature = "diagnostics"))]
+diff --git a/crates/victory-gpu/src/pipeline/library.rs b/crates/victory-gpu/src/pipeline/library.rs
+index f81db5772e92b899d862540608225fecd968a9f0..19d5e58c9f5930cd9e96a713bb0d4c7e9735f803 100644
+--- a/crates/victory-gpu/src/pipeline/library.rs
++++ b/crates/victory-gpu/src/pipeline/library.rs
+@@ -608,14 +608,75 @@ pub(crate) fn pipeline(
+         )
+     });
+     let _all = one_call();
+-    let _stores = library.saving.read().unwrap_or_else(|e| e.into_inner());
++    if stores_later() {
++        let queued = DeferredPipeline(wide, pso.clone());
++        store_or_defer(&library.saving, &DEFERRED, queued, |DeferredPipeline(wide, compiled)| {
++            store(library, name, &wide, &compiled);
++        });
++    } else {
++        let _stores = library.saving.read().unwrap_or_else(|e| e.into_inner());
++        store(library, name, &wide, &pso);
++    }
++    Ok(pso)
++}
++
++fn store(library: &Library, name: &str, wide: &HSTRING, pso: &ID3D12PipelineState) {
+     let _call = call("store", name);
+     // SAFETY: a live pipeline; a name already stored (a description that
+     // differs) is refused, which leaves the library as it was.
+-    if unsafe { library.library.StorePipeline(PCWSTR(wide.as_ptr()), &pso) }.is_ok() {
++    if unsafe { library.library.StorePipeline(PCWSTR(wide.as_ptr()), pso) }.is_ok() {
+         library.added.fetch_add(1, Ordering::Relaxed);
+     }
+-    Ok(pso)
++}
++
++struct DeferredPipeline(HSTRING, ID3D12PipelineState);
++
++// SAFETY: D3D12 pipeline states can be sent across threads.
++unsafe impl Send for DeferredPipeline {}
++
++static DEFERRED: Mutex<Vec<DeferredPipeline>> = Mutex::new(Vec::new());
++const DEFERRED_LIMIT: usize = 64;
++
++fn stores_later() -> bool {
++    static ON: OnceLock<bool> = OnceLock::new();
++    *ON.get_or_init(|| crate::switch::on("VICTORY_LIBRARY_STORE_LATER"))
++}
++
++/// A worker can publish a ready pipeline without waiting for serialization.
++/// Bound the retained pipelines under sustained contention.
++fn store_or_defer<T>(
++    saving: &RwLock<()>,
++    deferred: &Mutex<Vec<T>>,
++    item: T,
++    store: impl FnOnce(T),
++) {
++    let _reading = match saving.try_read() {
++        Ok(reading) => reading,
++        Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
++        Err(std::sync::TryLockError::WouldBlock) => {
++            let mut deferred = deferred.lock().unwrap_or_else(|error| error.into_inner());
++            if deferred.len() < DEFERRED_LIMIT {
++                deferred.push(item);
++                return;
++            }
++            drop(deferred);
++            saving.read().unwrap_or_else(|error| error.into_inner())
++        }
++    };
++    store(item);
++}
++
++fn flush_deferred(library: &Library) {
++    let deferred = std::mem::take(&mut *DEFERRED.lock().unwrap_or_else(|error| error.into_inner()));
++    if deferred.is_empty() {
++        return;
++    }
++    let _all = one_call();
++    let _reading = library.saving.read().unwrap_or_else(|error| error.into_inner());
++    tracing::info!(pipelines = deferred.len(), "storing deferred host pipelines");
++    for DeferredPipeline(name, pso) in deferred {
++        store(library, &name.to_string_lossy(), &name, &pso);
++    }
+ }
+ 
+ /// Writes the library and the early list if pipelines were added since the
+@@ -631,6 +692,9 @@ pub(crate) fn save(now: bool) {
+         }
+         *last = Some(std::time::Instant::now());
+     }
++    if stores_later() {
++        flush_deferred(library);
++    }
+     if let Err(e) = std::fs::create_dir_all(dir) {
+         tracing::warn!(error = %e, "host pipeline library not saved");
+         return;
+@@ -664,6 +728,9 @@ pub(crate) fn save(now: bool) {
+             size
+         }
+     };
++    if stores_later() {
++        flush_deferred(library);
++    }
+     // Through `used`: a process that asked for none yet (`victory shaders`)
+     // must not write the earlier runs' list over with nothing.
+     let used: Vec<String> = used().iter().flatten().cloned().collect();
+@@ -831,6 +898,18 @@ pub(crate) fn note_used(key: &str) {
+ 
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn completed_pipeline_can_be_deferred_while_cache_saves() {
++        let saving = std::sync::RwLock::new(());
++        let deferred = std::sync::Mutex::new(Vec::new());
++        let exclusive = saving.write().unwrap();
++        super::store_or_defer(&saving, &deferred, 42, |_| panic!("store ran under a save"));
++        drop(exclusive);
++        assert_eq!(*deferred.lock().unwrap(), [42]);
++        super::store_or_defer(&saving, &deferred, 43, |item| assert_eq!(item, 43));
++        assert_eq!(*deferred.lock().unwrap(), [42]);
++    }
++
+     use super::*;
+ 
+     #[test]
 diff --git a/crates/victory-gpu/src/pipeline/make.rs b/crates/victory-gpu/src/pipeline/make.rs
 index 9b7b095846b8a98170e1575bb3de394dc014e4a1..e00eed7467befde3c8b593406daf8e6089fe86c3 100644
 --- a/crates/victory-gpu/src/pipeline/make.rs
