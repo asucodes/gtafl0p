@@ -249,6 +249,14 @@ Two RTX 4050 diagnostics runs used the same executable, copied save and warmed d
 
 The default run showed a median of 3,316 MiB in out-of-buffer mirrors retained by descriptor slots. The candidate increased the peak bytes in overlapping virtual ranges from 336 to 1,422 MiB. The private-commit and DXGI figures describe different accounting views and cannot be added. Starting free RAM and draw load differed between runs. The candidate stayed experimental. Neither run verified playability or visual correctness.
 
+### Descriptor buffer refresh on VIctory-NVIDIA 63b902f
+
+The bindless heap refresh now uses the host buffer held by the published descriptor. A new title buffer can overlap the same virtual addresses after publication. Looking up those addresses again could refresh the new copy while the shader still reads the old one.
+
+Two focused tests passed on the RTX 4050 Laptop. A regression registers an overlapping buffer after creating a descriptor and checks that refresh follows the original buffer until the descriptor is rewritten. The existing test for views with offsets into a buffer also passed. The diagnostics build succeeded. The copied-save A/B run ended before both configurations had a comparable draw-heavy capture, so FPS and in-game rendering gains remain unverified.
+
+The experimental patch applies independently to VIctory-NVIDIA commit `63b902fe1720a5188ee79d94a88c8de0470f6349`. From that checkout, run `git apply --check <patch-path>` before applying it. The candidate enables descriptor-bound refresh by default. Set `VICTORY_BOUND_BUFFER_REFRESH=0` to select the previous lookup for comparison. [Patch and regression](patches/victory-nvidia-63b902f-bound-buffers.diff.txt)
+
 ## Credits and license
 
 **Marvisak and the VIctory contributors** built the loader, runtime, Direct3D 12 renderer and shader translator that make this work possible. **fxceless and the victory-fork contributors** maintain the parent of this repository. **trustno1-coder and the VIctory-NVIDIA contributors** built the NVIDIA line tested here. Individual backports are credited above. [VIctory](https://github.com/Marvisak/VIctory) · [victory-fork](https://github.com/fxceless/victory-fork) · [VIctory-NVIDIA](https://github.com/trustno1-coder/VIctory-NVIDIA)
