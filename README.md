@@ -234,6 +234,21 @@ Two additional runs used the same experimental executable, copies of the same sa
 
 The runs started with different physical memory headroom and progressed through the opening at different rates. Both had sustained memory pressure as private commit rose. The data leaves responsibility for that growth open. Both windows closed on request, and both isolated processes needed to be stopped after the normal-close timeout. The split allocator remains an isolated experiment.
 
+### Host buffer mirrors on 16 GiB RAM
+
+Two RTX 4050 diagnostics runs used the same executable, copied save and warmed disk cache. Both used the stock unsplit allocator and left the experimental direct constants path off. The candidate used a 1 MiB grid for requests with lengths and shorter allocations for unsized root views (`VICTORY_WINDOW_KB=1024`, `VICTORY_WINDOW_TAILS=1`).
+
+| Opening diagnostics, first 125 seconds from the first 1,000-draw host report | Default 4 MiB | 1 MiB and shorter tails |
+| --- | ---: | ---: |
+| Median live mirror bytes outside known buffers | 3,328 MiB | 3,130 MiB |
+| Median process private commit across in-process memory reports | 17,303 MiB | 17,342 MiB |
+| Median DXGI shared GPU memory in use | 5,651 MiB | 5,674 MiB |
+| Median FPS across qualifying host reports | 3.05 | 0.80 |
+| Reports at or below 0.4 FPS | 0 of 20 | 5 of 19 |
+| Longest reported interval between frames | 1,936 ms | 10,168 ms |
+
+The default run showed a median of 3,316 MiB in out-of-buffer mirrors retained by descriptor slots. The candidate increased the peak bytes in overlapping virtual ranges from 336 to 1,422 MiB. The private-commit and DXGI figures describe different accounting views and cannot be added. Starting free RAM and draw load differed between runs. The candidate stayed experimental. Neither run verified playability or visual correctness.
+
 ## Credits and license
 
 **Marvisak and the VIctory contributors** built the loader, runtime, Direct3D 12 renderer and shader translator that make this work possible. **fxceless and the victory-fork contributors** maintain the parent of this repository. **trustno1-coder and the VIctory-NVIDIA contributors** built the NVIDIA line tested here. Individual backports are credited above. [VIctory](https://github.com/Marvisak/VIctory) · [victory-fork](https://github.com/fxceless/victory-fork) · [VIctory-NVIDIA](https://github.com/trustno1-coder/VIctory-NVIDIA)
