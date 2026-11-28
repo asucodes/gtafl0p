@@ -218,6 +218,22 @@ PortWatch recorded VIctory-NVIDIA at #2 with a 90% progress score and 20 rendere
 We built that Foxhound-based source and ran it on the RTX 4050 Laptop with a copied prologue save, Series S, DLSS Performance, frame generation off and the laptop's texture and buffer limits. With an empty cache and diagnostic capture enabled, the title hit its loading watchdog before the first frame with 500 draws. With the populated cache and PNG capture off, the scene opened. Initial 3D samples in the first 45 seconds averaged about 0.5 frame beginnings per second, and a later 30-second sample averaged about 5.9. The logs group frame times above 70 ms in a single band, so exact median and p95 are unavailable. In a later sample, the submitting thread needed about 133 ms per frame and the renderer's GPU clock estimated 22% utilization. The window closed on request, and the isolated process needed to be stopped separately. We are keeping the older laptop base and evaluating individual rendering changes. [Watchdog behavior](https://github.com/Marvisak/VIctory/pull/454)
 
 
+### November 28 NVIDIA source comparison
+
+A fresh release build from VIctory-NVIDIA 63b902f ran the Series S profile at 540p with DLSS Performance and frame generation off. It reached the opening cutscene. Across the first 125 seconds from the first host report at or above 1,000 draws per frame, 20 qualifying reports had a median of 3.0 FPS and ranged from 0.6 to 3.3 FPS. One backlit close-up showed skin and facial detail. Rendering across the full opening remains unverified. [Upstream release](https://github.com/trustno1-coder/VIctory-NVIDIA/releases/tag/v2026.11.28.01)
+
+Two additional runs used the same experimental executable, copies of the same save and warmed disk cache, and direct constants enabled. The comparison changed only the launcher setting for the backing section size. The split allocator's byte-level test passed, and the laptop runs both reproduced the severe stall.
+
+| RTX 4050 opening, first 125 seconds of draw-heavy reports | One backing section per request | 2 MiB sections |
+| --- | ---: | ---: |
+| Median FPS across qualifying host reports | 0.40 | 0.35 |
+| Reports at or below 0.4 FPS | 11 of 18 | 9 of 14 |
+| Peak process private commit | 16.8 GiB | 17.7 GiB |
+| Lowest available physical RAM in sampled world window | 52 MiB | 169 MiB |
+| Longest reported interval between frames | 6,633 ms | 14,309 ms |
+
+The runs started with different physical memory headroom and progressed through the opening at different rates. Both had sustained memory pressure as private commit rose. The data leaves responsibility for that growth open. Both windows closed on request, and both isolated processes needed to be stopped after the normal-close timeout. The split allocator remains an isolated experiment.
+
 ## Credits and license
 
 **Marvisak and the VIctory contributors** built the loader, runtime, Direct3D 12 renderer and shader translator that make this work possible. **fxceless and the victory-fork contributors** maintain the parent of this repository. **trustno1-coder and the VIctory-NVIDIA contributors** built the NVIDIA line tested here. Individual backports are credited above. [VIctory](https://github.com/Marvisak/VIctory) · [victory-fork](https://github.com/fxceless/victory-fork) · [VIctory-NVIDIA](https://github.com/trustno1-coder/VIctory-NVIDIA)
